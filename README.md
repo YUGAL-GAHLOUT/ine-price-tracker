@@ -392,21 +392,31 @@ a separate scheduled workflow smoke-tests the scraper against the live store dai
 
 ### Backend → Render
 
+Use the **Docker** runtime, not Render's native Node runtime.
+
+Chromium needs system libraries (`libnss3`, `libatk`, `libgbm`, fonts…) that
+`playwright install --with-deps` installs via `apt-get`. Render's build step runs
+without root, so that command fails with `su: Authentication failure` →
+`Failed to install browsers`. [`backend/Dockerfile`](backend/Dockerfile) is based on
+Playwright's official image, which already contains them.
+
 Either use the committed [`render.yaml`](render.yaml) blueprint (**New → Blueprint**), or
 configure a Web Service manually:
 
 | Setting | Value |
 |---|---|
-| Root directory | `backend` |
-| Build command | `npm ci && npx playwright install --with-deps chromium chromium-headless-shell` |
-| Start command | `npm start` |
+| Language / Runtime | **Docker** |
+| Dockerfile path | `./backend/Dockerfile` |
+| Docker build context | `./backend` |
 | Health check path | `/api/health` |
+
+On the free instance (0.1 CPU / 512 MB) also set `SCRAPE_CONCURRENCY=1` and
+`SCRAPE_ATTEMPT_TIMEOUT_MS=90000` — one browser at a time, and a longer per-attempt
+budget, since Chromium is several times slower there than on a laptop.
 
 Environment variables to set in the dashboard: `SUPABASE_URL`,
 `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `NODE_ENV=production`,
-`CORS_ORIGINS=https://<your-vercel-app>.vercel.app`, and
-`PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/backend/.playwright` so the browser
-download survives in the build cache.
+`CORS_ORIGINS=https://<your-vercel-app>.vercel.app`.
 
 After the first deploy, seed the catalogue once from the Render shell
 (or locally against the same Supabase project):
@@ -415,8 +425,8 @@ After the first deploy, seed the catalogue once from the Render shell
 npm run catalog:sync
 ```
 
-> Chromium on a 512 MB free instance is tight. `SCRAPE_CONCURRENCY=2` is chosen for that;
-> raise it only on a paid plan.
+> Chromium on a 512 MB / 0.1 CPU free instance is tight. `SCRAPE_CONCURRENCY=1` is chosen
+> for that; raise it only on a paid plan.
 
 ### Frontend → Vercel
 

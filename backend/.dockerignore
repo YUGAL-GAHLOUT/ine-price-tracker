@@ -1,0 +1,9 @@
+node_modules
+.env
+.env.*
+!.env.example
+.playwright
+.scratch
+tests
+npm-debug.log*
+*.log

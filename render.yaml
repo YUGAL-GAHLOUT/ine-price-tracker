@@ -3,19 +3,24 @@
 services:
   - type: web
     name: ine-price-tracker-api
-    runtime: node
+    # Docker, not the native Node runtime: Chromium needs system libraries that
+    # `playwright install --with-deps` cannot add on Render (the build step has no
+    # root, so apt-get fails). The Playwright base image ships them already.
+    runtime: docker
+    dockerfilePath: ./backend/Dockerfile
+    dockerContext: ./backend
     plan: free
     region: singapore
-    rootDir: backend
-    buildCommand: npm ci && npx playwright install --with-deps chromium chromium-headless-shell
-    startCommand: npm start
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
         value: production
-      # Keep Playwright's browsers inside the project so Render's build cache keeps them.
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/src/backend/.playwright
+      # One browser at a time: the free instance has 0.1 CPU and 512 MB RAM.
+      - key: SCRAPE_CONCURRENCY
+        value: "1"
+      # Chromium is several times slower on 0.1 CPU than on a laptop.
+      - key: SCRAPE_ATTEMPT_TIMEOUT_MS
+        value: "90000"
       # Set these in the Render dashboard — never in this file.
       - key: SUPABASE_URL
         sync: false
