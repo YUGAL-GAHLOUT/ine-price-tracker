@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.js
+
+# Environment — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+build/
+.vercel/
+.next/
+
+# Playwright
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+.scratch/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+logs/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Demo recordings (attach to the submission email instead of the repo)
+recordings/
+*.mov
+*.mp4

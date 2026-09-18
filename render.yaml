@@ -1,0 +1,27 @@
+# Render blueprint for the backend API + scraper.
+# Render > New > Blueprint, point it at this repository.
+services:
+  - type: web
+    name: ine-price-tracker-api
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: backend
+    buildCommand: npm ci && npx playwright install --with-deps chromium chromium-headless-shell
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Keep Playwright's browsers inside the project so Render's build cache keeps them.
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/project/src/backend/.playwright
+      # Set these in the Render dashboard — never in this file.
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: CRON_SECRET
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false

@@ -1,0 +1,23 @@
+# Optional: a scheduled smoke test that the scraper still works against the mock
+# store, independent of the production cron. It writes nothing to the database.
+name: Scraper smoke test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '30 3 * * *' # daily, 03:30 UTC
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: backend/package-lock.json }
+      - run: npm ci --ignore-scripts
+      - run: npx playwright install --with-deps chromium chromium-headless-shell
+      - name: Dry-run scrape (no database writes)
+        run: node scripts/scrape-cli.js --id 88 --repeat 3
