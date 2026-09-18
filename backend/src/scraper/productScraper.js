@@ -171,11 +171,19 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
       onStep('consent');
       await dismissConsent(page);
 
-      const block = page.locator('.price-block');
+      const block = page.locator('.price-block').first();
       try {
         await block.waitFor({ state: 'visible', timeout: 20_000 });
-      } catch {
-        throw new ScrapeError(FailureCode.PRICE_BLOCK_MISSING, 'Price block never rendered');
+      } catch (e) {
+        // Say WHAT the page showed instead. Without this the log just claims the
+        // price block was missing, which hides the real cause (the product fetch
+        // failing, a rate limit, or the SPA rendering an error state).
+        const visible = (await page.locator('body').innerText().catch(() => '')) || '';
+        const snippet = visible.replace(/\s+/g, ' ').trim().slice(0, 160);
+        throw new ScrapeError(
+          FailureCode.PRICE_BLOCK_MISSING,
+          `Price block never rendered (${e.message.split('\n')[0]}). Page showed: ${snippet || '<empty>'}`,
+        );
       }
 
       onStep('hover-gate');

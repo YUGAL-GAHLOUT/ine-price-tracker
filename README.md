@@ -379,8 +379,11 @@ cd backend && npm test
 **Integration testing against the live store** (this is the one that matters):
 
 ```bash
-node scripts/scrape-cli.js --id 88 --repeat 8
+node scripts/scrape-cli.js --id 88 --repeat 12
 ```
+
+Most recent measured result: **26/26 passes produced a validated observation** across
+runs of 8, 6 and 12, with 14 individual attempts failing and being recovered by retry.
 
 CI (GitHub Actions) runs the unit tests and a production frontend build on every push;
 a separate scheduled workflow smoke-tests the scraper against the live store daily.

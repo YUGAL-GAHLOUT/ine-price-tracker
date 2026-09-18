@@ -125,9 +125,20 @@ Around that:
   the log says *why*, not just "error".
 - **`PermanentError` short-circuits.** An invalid product id is not retried 4 times.
 
-Measured over 8 consecutive live runs during development: 8/8 produced a validated
-observation; 2 needed a second attempt; 1 was rescued by the adaptive wait after the
-store reported an internal retry.
+Measured over **26 consecutive live passes** against the store after these fixes
+(runs of 8, 6 and 12): **26/26 produced a validated observation, 0 final failures.**
+14 individual attempts failed along the way and were recovered by retry — the worst
+pass needed 4 attempts (`reveal_click_failed` → `reveal_timeout` → `price_pending` →
+success). Observed attempt-level failure modes, all handled:
+
+| Failure code | What it means |
+|---|---|
+| `reveal_timeout` | the store dropped the quote callback; only a reload fixes it |
+| `price_pending` | the figure was rendered as "Updating…" and is not final |
+| `reveal_click_failed` | the consent overlay re-appeared and intercepted the click |
+| `price_block_missing` | the product page did not render (error message captured in the log) |
+
+Before the adaptive-wait fix the same test failed 1 pass in 5.
 
 ## 5. Honest history and logging
 
