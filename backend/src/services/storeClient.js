@@ -1,5 +1,5 @@
 import { STORE_ORIGIN } from '../config/store.js';
-import { retry } from '../scraper/retry.js';
+import { RateLimitError, retry } from '../scraper/retry.js';
 
 /**
  * Lightweight HTTP access to the store's JSON endpoints.
@@ -16,6 +16,12 @@ async function getJson(path, { timeoutMs = 15_000 } = {}) {
       signal: ctrl.signal,
       headers: { accept: 'application/json' },
     });
+    if (res.status === 429) {
+      // The store rate-limits bursts and tells us how long to back off for.
+      // Treating this as a generic error silently loses data, so it gets its own type.
+      const retryAfter = Number(res.headers.get('retry-after'));
+      throw new RateLimitError(`GET ${path} -> 429`, (Number.isFinite(retryAfter) ? retryAfter : 1) * 1000);
+    }
     if (!res.ok) {
       const err = new Error(`GET ${path} -> ${res.status}`);
       err.status = res.status;
@@ -27,8 +33,8 @@ async function getJson(path, { timeoutMs = 15_000 } = {}) {
   }
 }
 
-async function getJsonWithRetry(path, opts) {
-  const result = await retry(() => getJson(path, opts), { attempts: 3, baseMs: 500, maxMs: 4_000 });
+async function getJsonWithRetry(path, { attempts = 5, ...opts } = {}) {
+  const result = await retry(() => getJson(path, opts), { attempts, baseMs: 500, maxMs: 4_000 });
   if (!result.ok) throw result.error;
   return result.value;
 }
@@ -60,37 +66,65 @@ export async function getProduct(id) {
  * are dense in 1..total, so walking ids is the deterministic way to build a
  * complete search index.
  */
-export async function walkCatalog({ total, concurrency = 8, onProgress } = {}) {
+export async function walkCatalog({ total, concurrency = 4, onProgress } = {}) {
   const size = total ?? (await getCatalogSize());
-  const ids = Array.from({ length: size }, (_, i) => i + 1);
   const out = [];
-  let cursor = 0;
-  let done = 0;
+  const failed = [];
 
-  async function worker() {
-    while (cursor < ids.length) {
-      const id = ids[cursor++];
-      const p = await getProduct(id).catch(() => null);
-      if (p) {
-        out.push({
-          store_product_id: p.id,
-          slug: p.slug,
-          name: p.name,
-          brand: p.brand ?? null,
-          category: p.category ?? null,
-          sku: p.sku ?? null,
-          description: p.description ?? null,
-          synced_at: new Date().toISOString(),
-        });
+  const toRow = (p) => ({
+    store_product_id: p.id,
+    slug: p.slug,
+    name: p.name,
+    brand: p.brand ?? null,
+    category: p.category ?? null,
+    sku: p.sku ?? null,
+    description: p.description ?? null,
+    synced_at: new Date().toISOString(),
+  });
+
+  /** Fetch a list of ids with a small worker pool; collect ids we could not get. */
+  async function pass(ids) {
+    const missed = [];
+    let cursor = 0;
+    let done = 0;
+
+    async function worker() {
+      while (cursor < ids.length) {
+        const id = ids[cursor++];
+        try {
+          const p = await getProduct(id);
+          if (p) out.push(toRow(p));
+          // A genuine 404 is a real gap in the id range, not a failure.
+        } catch {
+          // Anything else (rate limit we could not ride out, network) is a miss we
+          // must NOT confuse with "this product does not exist".
+          missed.push(id);
+        }
+        done++;
+        if (onProgress && done % 50 === 0) onProgress(done, ids.length, missed.length);
       }
-      done++;
-      if (onProgress && done % 50 === 0) onProgress(done, ids.length);
     }
+
+    await Promise.all(Array.from({ length: concurrency }, worker));
+    return missed;
   }
 
-  await Promise.all(Array.from({ length: concurrency }, worker));
+  let pending = Array.from({ length: size }, (_, i) => i + 1);
+
+  // The store returns 429 under load. Retry-After is honoured per request; on top
+  // of that we re-sweep whatever still failed, with a smaller pool each time.
+  for (let round = 0; round < 3 && pending.length; round++) {
+    if (round > 0) {
+      concurrency = Math.max(1, Math.floor(concurrency / 2));
+      onProgress?.(0, pending.length, pending.length);
+      await new Promise((r) => setTimeout(r, 3_000));
+    }
+    pending = await pass(pending);
+  }
+
+  failed.push(...pending);
   out.sort((a, b) => a.store_product_id - b.store_product_id);
-  return out;
+  return { rows: out, failedIds: failed, expected: size };
 }
 
 /**

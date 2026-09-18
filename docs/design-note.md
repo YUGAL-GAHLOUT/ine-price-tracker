@@ -116,6 +116,10 @@ Around that:
 - **Exponential backoff with full jitter** (`random(0, min(cap, base · 2ⁿ))`). Full
   jitter rather than fixed backoff so that several products retrying after a shared
   outage do not re-collide on every round.
+- **Rate limits are obeyed, not guessed.** The store answers bursts with `429` +
+  `Retry-After`. That gets its own error type and the server's own delay is honoured,
+  because retrying sooner just earns another 429 — and, crucially, it is never confused
+  with "not found".
 - **Typed failure codes** — `reveal_gate_failed`, `reveal_timeout`, `price_pending`,
   `quote_mismatch`, `price_unparseable`, `stock_not_found`, … — stored per attempt, so
   the log says *why*, not just "error".
@@ -222,13 +226,26 @@ turned the store's dropped-callback fault into a 45 s stall before each retry, a
 made the wait adaptive — extend while the store reports progress, fail fast when it is
 silently stuck. The same test then passed 8/8.
 
-**7. A real failure was mis-labelled `unknown`.** A `locator.click` timeout on the
+**7. The catalogue sync silently lost 86% of the store.** The first sync run reported
+`Fetched 143 products` out of 1000 and **exited successfully**. The store rate-limits
+bursts with `429` + `Retry-After: 1`, and the HTTP client treated any non-404 error the
+same as a 404 — "this product does not exist" — so 857 products were quietly dropped and
+the search index shipped 14% complete. This is the same class of bug as the decoy price:
+wrong data, no error. *Correction:* gave rate limiting its own `RateLimitError` type,
+honoured `Retry-After` (with jitter) instead of guessing a shorter backoff, lowered
+concurrency from 8 to 4, added re-sweep rounds over ids that genuinely failed, and made
+the script **warn loudly and exit non-zero** on an incomplete sync. The re-run went
+1000 → 208 missed → 4 → 0, and now reports `Catalogue rows: 1000/1000`.
+
+**8. A real failure was mis-labelled `unknown`.** A `locator.click` timeout on the
 reveal button surfaced as an untyped error, which would have made the scrape log less
 useful precisely when it mattered. *Correction:* added a dedicated
 `reveal_click_failed` code.
 
-The pattern across all seven: every one was caught by **checking against the live site**
-rather than by reasoning about it. Nothing here was verified by assumption.
+The pattern across all eight: every one was caught by **checking against the live site**
+rather than by reasoning about it. Three of them — the decoy price, the random
+pagination and the silent 86% catalogue loss — produced *no error at all*; they would
+have shipped as quietly wrong data. Nothing here was verified by assumption.
 
 ## 9. Known limitations
 
@@ -236,7 +253,9 @@ rather than by reasoning about it. Nothing here was verified by assumption.
   changes how it decodes payloads, observations silently drop to `cross_checked = false`
   rather than failing — correct behaviour, but the safety net is thinner until fixed.
 - The mirrored catalogue goes stale; `npm run catalog:sync` must be re-run if the store
-  changes its inventory. New products are otherwise invisible to search.
+  changes its inventory. New products are otherwise invisible to search. A full sync
+  takes ~16 minutes because the store rate-limits and we deliberately back off rather
+  than hammer it.
 - Free-tier Render cold starts add roughly 30–60 s to the first cron call of a quiet
   period. The run still completes; it just takes longer.
 - Concurrency of 2 means a large number of tracked products lengthens the run

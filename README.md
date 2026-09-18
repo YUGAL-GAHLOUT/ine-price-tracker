@@ -147,7 +147,10 @@ cp .env.example .env
    cd backend && npm run catalog:sync
    ```
 
-   This walks the store's 1000 product ids and upserts them. Takes roughly a minute.
+   This walks the store's 1000 product ids and upserts them. **It takes ~15–20 minutes**,
+   because the store rate-limits bursts (`429` + `Retry-After`) and the sync backs off
+   rather than hammering it. It prints progress, re-sweeps any ids that failed, warns
+   loudly and exits non-zero if the catalogue is incomplete, and is safe to re-run.
 
 > **Why a mirror?** The store's `/api/catalog` returns a *random sample* on every call
 > and caps `pageSize` at 60, so it cannot be paged through to enumerate the catalogue.
@@ -355,7 +358,7 @@ Errors use one shape:
 cd backend && npm test
 ```
 
-41 unit tests covering the parts where a bug would corrupt data silently:
+43 unit tests covering the parts where a bug would corrupt data silently:
 
 - **`parsePrice`** — all seven formats the store rotates through (default, spaced,
   European, trailing-text, full-width Unicode, NBSP, split-carrier with zero-width
@@ -367,6 +370,8 @@ cd backend && npm test
   `PermanentError` short-circuit, and that **every attempt is reported** so the log can
   show failures that preceded a success.
 - **`backoffDelay`** — exponential growth, cap respected, genuine jitter.
+- **Rate limiting** — `Retry-After` is honoured over our own backoff, and a 429 surfaces
+  as its own type so it can never be mistaken for "product not found".
 - **`withTimeout`** — rejects when a promise never settles (the store's worst fault).
 - **Target guard** — only `demo.inelabteamdev.com` URLs can ever be produced; ids that
   are not positive integers are rejected, so no caller can redirect the scraper.
@@ -445,25 +450,28 @@ Summarised here; the reasoning is in [`docs/design-note.md`](docs/design-note.md
 
 1. **Right tool per job.** HTTP for catalogue JSON; a browser only for price and stock,
    which genuinely require executing WASM and a proof-of-work.
-2. **Never trust the obvious selector.** The store renders two *hidden decoy prices* on
+2. **Obey rate limits, and never mistake one for "not found".** The store answers bursts
+   with `429` + `Retry-After`; that has its own error type, the server's delay is
+   honoured, and failed ids are re-swept rather than silently dropped.
+3. **Never trust the obvious selector.** The store renders two *hidden decoy prices* on
    `.price-value` and `[data-price]`. The real element is located via the class the store
    publishes at `/api/layout`, with a structural fallback that raises a
    `structure_change` alert when used.
-3. **Parse defensively.** Seven rotating price formats and five stock phrasings are
+4. **Parse defensively.** Seven rotating price formats and five stock phrasings are
    normalised; anything not fully understood returns `null` and fails the scrape rather
    than guessing.
-4. **Cross-check.** The parsed DOM value is compared against the figure the page itself
+5. **Cross-check.** The parsed DOM value is compared against the figure the page itself
    computed. Disagreement fails the scrape (`quote_mismatch`) instead of recording either.
-5. **Bound everything.** Per-attempt timeouts, because the store sometimes drops a
+6. **Bound everything.** Per-attempt timeouts, because the store sometimes drops a
    callback and the page hangs forever.
-6. **Retry deliberately.** 4 attempts, exponential backoff with full jitter, typed
+7. **Retry deliberately.** 4 attempts, exponential backoff with full jitter, typed
    failure codes, `PermanentError` short-circuit — never an infinite loop.
-7. **Distinguish slow from dead.** The wait extends while the store reports internal
+8. **Distinguish slow from dead.** The wait extends while the store reports internal
    retries and fails fast when it is silently stuck, because only a reload fixes the latter.
-8. **Fail honestly.** Failures write a log row with a reason and **no** history row. The
+9. **Fail honestly.** Failures write a log row with a reason and **no** history row. The
    last known good price is never overwritten. Database `CHECK` constraints make a
    dishonest log physically impossible.
-9. **Survive the schedule.** External cron (free tiers sleep), a database-level run lock
+10. **Survive the schedule.** External cron (free tiers sleep), a database-level run lock
    against duplicate invocations, stale-run reaping, capped concurrency, and per-product
    isolation so one failure never aborts a run.
 
@@ -471,7 +479,8 @@ Summarised here; the reasoning is in [`docs/design-note.md`](docs/design-note.md
 
 - The cross-check depends on a store internal; if it changes, observations degrade to
   `cross_checked = false` rather than failing.
-- The catalogue mirror goes stale — re-run `npm run catalog:sync` if inventory changes.
+- The catalogue mirror goes stale — re-run `npm run catalog:sync` if inventory changes
+  (~15–20 min, since the store rate-limits and the sync backs off politely).
 - Render free-tier cold starts add 30–60 s to the first cron call after an idle period.
 - Concurrency of 2 means the run lengthens with many tracked products; beyond ~20 the
   2-hour cadence would need a larger instance.

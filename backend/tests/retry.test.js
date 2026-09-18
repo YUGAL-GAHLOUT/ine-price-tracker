@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import { PermanentError, TimeoutError, backoffDelay, retry, withTimeout } from '../src/scraper/retry.js';
+import { PermanentError, RateLimitError, TimeoutError, backoffDelay, retry, withTimeout } from '../src/scraper/retry.js';
 
 describe('retry', () => {
   it('returns immediately on a first-attempt success', async () => {
@@ -53,6 +53,30 @@ describe('retry', () => {
     const r = await retry(async () => { calls++; throw new PermanentError('invalid id'); }, { attempts: 5, baseMs: 1 });
     assert.equal(r.ok, false);
     assert.equal(calls, 1);
+  });
+});
+
+describe('retry — rate limiting', () => {
+  it('waits at least as long as the server asked before retrying', async () => {
+    let calls = 0;
+    const started = Date.now();
+    const r = await retry(async () => {
+      if (++calls === 1) throw new RateLimitError('429', 300);
+      return 'ok';
+    }, { attempts: 3, baseMs: 1 });
+
+    assert.equal(r.ok, true);
+    // Our own backoff base is 1ms, so anything near 300ms proves Retry-After won.
+    assert.ok(Date.now() - started >= 300, 'should have honoured Retry-After');
+  });
+
+  it('surfaces a rate limit as its own error type, not a generic failure', async () => {
+    // The catalogue walk must be able to tell "slow down" apart from "no such
+    // product" — conflating them silently drops real products from the index.
+    const r = await retry(async () => { throw new RateLimitError('429', 1); }, { attempts: 2, baseMs: 1 });
+    assert.equal(r.ok, false);
+    assert.ok(r.error instanceof RateLimitError);
+    assert.equal(r.error.retryAfterMs, 1);
   });
 });
 

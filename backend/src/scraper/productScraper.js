@@ -96,8 +96,25 @@ async function dismissConsent(page) {
  * rotating class from `/api/layout`, with a structural fallback.
  */
 async function extractFromDom(page) {
+  // The store rate-limits bursts (429 + Retry-After). Losing the layout here would
+  // push us onto the structural fallback and raise a false "structure change"
+  // alert, so give it a couple of tries before giving up.
   const layout = await page.evaluate(async () => {
-    try { return await fetch('/api/layout').then((r) => r.json()); } catch { return null; }
+    for (let i = 0; i < 3; i++) {
+      try {
+        const res = await fetch('/api/layout');
+        if (res.ok) return await res.json();
+        if (res.status === 429) {
+          const wait = (Number(res.headers.get('retry-after')) || 1) * 1000;
+          await new Promise((r) => setTimeout(r, wait + 200));
+          continue;
+        }
+        return null;
+      } catch {
+        await new Promise((r) => setTimeout(r, 400));
+      }
+    }
+    return null;
   });
 
   return page.evaluate((classes) => {

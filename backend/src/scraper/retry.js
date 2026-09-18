@@ -25,6 +25,15 @@ export class TimeoutError extends Error {
   constructor(message) { super(message); this.name = 'TimeoutError'; }
 }
 
+/** The server asked us to slow down and said for how long. */
+export class RateLimitError extends Error {
+  constructor(message, retryAfterMs) {
+    super(message);
+    this.name = 'RateLimitError';
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 /** Errors that mean "this will never succeed, stop retrying". */
 export class PermanentError extends Error {
   constructor(message) { super(message); this.name = 'PermanentError'; }
@@ -48,6 +57,9 @@ export function backoffDelay(attempt, { baseMs = 1000, maxMs = 15000 } = {}) {
  * can record each one honestly in the scrape log, including the ones that failed
  * before a later attempt succeeded.
  *
+ * When the server tells us how long to wait (HTTP 429 `Retry-After`), that wins
+ * over our own backoff — guessing shorter just earns another 429.
+ *
  * @returns {Promise<{ok: true, value: any, attempts: number}|{ok: false, error: Error, attempts: number}>}
  */
 export async function retry(fn, { attempts = 3, baseMs = 1000, maxMs = 15000, onAttempt } = {}) {
@@ -62,7 +74,14 @@ export async function retry(fn, { attempts = 3, baseMs = 1000, maxMs = 15000, on
       lastError = error;
       await onAttempt?.({ attempt, ok: false, error, durationMs: Date.now() - startedAt });
       if (error instanceof PermanentError) break;
-      if (attempt < attempts) await sleep(backoffDelay(attempt, { baseMs, maxMs }));
+      if (attempt < attempts) {
+        const serverAsked = error instanceof RateLimitError ? error.retryAfterMs : 0;
+        // Jitter on top of Retry-After so parallel workers do not all wake together.
+        const wait = serverAsked
+          ? serverAsked + Math.floor(Math.random() * 400)
+          : backoffDelay(attempt, { baseMs, maxMs });
+        await sleep(wait);
+      }
     }
   }
   return { ok: false, error: lastError, attempts: Math.min(attempts, (lastError && attempts) || attempts) };
