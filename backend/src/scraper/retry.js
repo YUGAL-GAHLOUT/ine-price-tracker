@@ -64,7 +64,9 @@ export function backoffDelay(attempt, { baseMs = 1000, maxMs = 15000 } = {}) {
  */
 export async function retry(fn, { attempts = 3, baseMs = 1000, maxMs = 15000, onAttempt } = {}) {
   let lastError;
+  let used = 0;
   for (let attempt = 1; attempt <= attempts; attempt++) {
+    used = attempt;
     const startedAt = Date.now();
     try {
       const value = await fn(attempt);
@@ -89,5 +91,7 @@ export async function retry(fn, { attempts = 3, baseMs = 1000, maxMs = 15000, on
       }
     }
   }
-  return { ok: false, error: lastError, attempts: Math.min(attempts, (lastError && attempts) || attempts) };
+  // The attempts actually spent, not the budget: a permanent error breaks out of
+  // the loop early, and the log should say so rather than claim four tries.
+  return { ok: false, error: lastError, attempts: used };
 }

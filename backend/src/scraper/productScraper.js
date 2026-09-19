@@ -21,6 +21,7 @@ export const FailureCode = {
   STOCK_NOT_FOUND: 'stock_not_found',
   STOCK_UNPARSEABLE: 'stock_unparseable',
   QUOTE_MISMATCH: 'quote_mismatch',
+  BROWSER_LOST: 'browser_lost',
   ATTEMPT_TIMEOUT: 'attempt_timeout',
   UNKNOWN: 'unknown',
 };
@@ -34,6 +35,23 @@ export class ScrapeError extends Error {
     // When set, retry() waits at least this long instead of its own backoff.
     this.retryAfterMs = retryAfterMs;
   }
+}
+
+/**
+ * The browser, context or page went away mid-attempt: a headed window closed by
+ * hand, or Chromium killed under memory pressure. Nothing about the product or
+ * the store is wrong, and every remaining attempt would fail the same way against
+ * the same dead instance, so this is treated as permanent for this run.
+ */
+const BROWSER_LOST_RE = /target (page|closed)|context or browser has been closed|browser has (been closed|disconnected)/i;
+
+function browserLostIf(message, context) {
+  if (!BROWSER_LOST_RE.test(message ?? '')) return null;
+  return new ScrapeError(
+    FailureCode.BROWSER_LOST,
+    `Browser went away during ${context}: ${String(message).split('\n')[0]}`,
+    { permanent: true },
+  );
 }
 
 /** How long to wait out a rate limit before trying the product again. */
@@ -180,7 +198,17 @@ async function extractFromDom(page) {
  */
 export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, onStep = () => {} } = {}) {
   const url = productUrl(product.store_product_id);
-  const { context, page } = await newScrapePage(browser);
+
+  // A dead browser surfaces here first, before any step runs. Left unwrapped this
+  // escaped as a bare Error with no failure code and burned every retry.
+  let context;
+  let page;
+  try {
+    ({ context, page } = await newScrapePage(browser));
+  } catch (e) {
+    const message = e?.message ?? String(e);
+    throw browserLostIf(message, 'startup') ?? new ScrapeError(FailureCode.UNKNOWN, message);
+  }
 
   try {
     return await withTimeout((async () => {
@@ -188,7 +216,8 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: Math.min(30_000, timeoutMs) });
       } catch (e) {
-        throw new ScrapeError(FailureCode.NAVIGATION_FAILED, `Navigation failed: ${e.message}`);
+        throw browserLostIf(e.message, 'navigation')
+          ?? new ScrapeError(FailureCode.NAVIGATION_FAILED, `Navigation failed: ${e.message}`);
       }
 
       onStep('consent');
@@ -203,6 +232,7 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
         // failing, a rate limit, or the SPA rendering an error state).
         const visible = (await page.locator('body').innerText().catch(() => '')) || '';
         throw (
+          browserLostIf(e.message, 'page load') ??
           rateLimitedIf(visible, 'page load') ??
           new ScrapeError(
             FailureCode.PRICE_BLOCK_MISSING,
@@ -220,7 +250,8 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
         await page.getByRole('button', { name: /reveal price/i }).click({ timeout: 10_000 });
       } catch (e) {
         // Usually the consent overlay reappearing and intercepting the click.
-        throw new ScrapeError(FailureCode.REVEAL_CLICK_FAILED, `Could not click Reveal price: ${e.message.split('\n')[0]}`);
+        throw browserLostIf(e.message, 'the reveal click')
+          ?? new ScrapeError(FailureCode.REVEAL_CLICK_FAILED, `Could not click Reveal price: ${e.message.split('\n')[0]}`);
       }
 
       // The store injects faults here: ~35% of loads either stall for 900ms or
@@ -321,8 +352,9 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
     if (e instanceof ScrapeError) throw e;
     if (e instanceof TimeoutError) throw new ScrapeError(FailureCode.ATTEMPT_TIMEOUT, e.message);
     if (e instanceof PermanentError) throw new ScrapeError(FailureCode.UNKNOWN, e.message, { permanent: true });
-    throw new ScrapeError(FailureCode.UNKNOWN, e?.message ?? String(e));
+    const message = e?.message ?? String(e);
+    throw browserLostIf(message, 'the attempt') ?? new ScrapeError(FailureCode.UNKNOWN, message);
   } finally {
-    await context.close().catch(() => {});
+    await context?.close().catch(() => {});
   }
 }

@@ -13,6 +13,13 @@ let launchedHeaded = null;
 export async function getBrowser({ headed = false, slowMo = 0 } = {}) {
   // Headed and headless cannot share one instance; relaunch if the mode changes.
   if (browserPromise && launchedHeaded !== headed) await closeBrowser();
+  // A headed window the user closed, or a Chromium killed under memory pressure,
+  // leaves a resolved promise wrapping a dead instance. Without this check every
+  // later scrape would keep driving the corpse and fail with a misleading reason.
+  if (browserPromise) {
+    const alive = await browserPromise.then((b) => b.isConnected()).catch(() => false);
+    if (!alive) await closeBrowser();
+  }
   if (!browserPromise) {
     launchedHeaded = headed;
     browserPromise = chromium.launch({ headless: !headed, slowMo });
@@ -25,7 +32,7 @@ export async function closeBrowser() {
   browserPromise = null;
   launchedHeaded = null;
   if (p) {
-    try { (await p).close(); } catch { /* already gone */ }
+    try { await (await p).close(); } catch { /* already gone */ }
   }
 }
 
