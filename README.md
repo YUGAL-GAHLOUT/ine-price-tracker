@@ -60,7 +60,7 @@ simply stop running. An external caller both triggers the run and wakes the inst
 backend/src/
   scraper/   browser.js (shared Chromium + cross-check hook) · productScraper.js (one
              attempt: navigate → gate → reveal → extract) · normalize.js (price/stock
-             parsing, pure and heavily tested) · retry.js (timeout, backoff, jitter)
+             parsing, pure and side-effect free) · retry.js (timeout, backoff, jitter)
   services/  storeClient.js (store JSON) · scrapeService.js (retries, validation, honest
              logging, concurrency) · trackingService.js
   config/ db/ controllers/ routes/ middleware/ utils/
@@ -205,13 +205,29 @@ elapsed (with a 10-minute grace window, since `last_scraped_at` is stamped when 
 with bounded concurrency, and writes history for the successes and a log for every attempt.
 One product failing never aborts the run.
 
-On cron-job.org: `POST` every 2 hours to `.../api/cron/scrape?async=1` with header
-`Authorization: Bearer <CRON_SECRET>`, request timeout raised to 30 s for the Render cold
-start. A second job hitting `GET /api/health` every 10 minutes keeps the instance warm.
+On cron-job.org, two jobs, both in the **same timezone** (UTC) so their offsets line up:
+
+- **Scrape** — `POST` to `.../api/cron/scrape?async=1` on `0 */2 * * *`, header
+  `Authorization: Bearer <CRON_SECRET>`, request timeout 30 s, and **2 retries 60-120 s
+  apart**. Mark `409` as a success alongside `2xx`: a retry landing while the first
+  attempt's background run still holds the lock gets `409`, which is correct behaviour and
+  not a failure. The retries cover deploy windows and cold starts, both of which fail in
+  under a second at Render's edge and would otherwise cost a whole 2-hour cycle.
+- **Keep warm** — `GET /api/health` on `50,55 1-23/2 * * *`, i.e. 5 and 10 minutes before
+  each scrape, so the trigger at `:00` always lands on a live instance.
+
 Use `/api/health` (35 bytes), **not** `/api/status` — the latter returns recent runs, logs
 and alerts (~26 KB), which exceeds cron-job.org's response cap. That fails the job every
 run, and a job that keeps failing gets disabled — leaving the instance cold, so the next
 scheduled scrape hits a spun-down service and returns Render's HTML error page instead.
+
+Warm the instance *before* each scrape rather than around the clock. A ping every 10 or 15
+minutes works, but it never lets the instance sleep: that is ~730 of the free tier's 750
+monthly instance-hours for a service that needs to be awake twelve times a day, and running
+out suspends the service — which looks like exactly the same HTML error page. A 15-minute
+ping is also marginal on its own terms, since Render sleeps after ~15 minutes idle and
+cron-job.org fires with up to a minute of jitter, so two pings can fall more than 15 minutes
+apart. Two pings just before the scrape are both cheaper and more reliable.
 
 ### Manual scraping
 

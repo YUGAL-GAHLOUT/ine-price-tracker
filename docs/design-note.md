@@ -175,7 +175,8 @@ Render's free tier sleeps, so an in-process `setInterval` would simply stop runn
 and would also be wrong on a restart. Scheduling is therefore external:
 **cron-job.org calls `POST /api/cron/scrape` every 2 hours**, authenticated with a
 shared secret compared in constant time, plus a second unauthenticated job hitting
-`GET /api/health` every 10 minutes as the keep-warm ping.
+`GET /api/health` at `50,55 1-23/2 * * *` as the keep-warm ping — 5 and 10 minutes ahead
+of each scrape, rather than around the clock.
 
 The keep-warm ping must target `/api/health`, not `/api/status`: `/api/status` carries
 recent runs, logs and alerts (~26 KB) and exceeds cron-job.org's response cap, so it fails
@@ -183,6 +184,24 @@ on every run and the job is eventually disabled. The instance then goes cold, an
 scheduled scrape arriving at a spun-down service is answered by Render's edge
 (`x-render-routing: no-deploy`) with an HTML error page — the request never reaches Node,
 so nothing is recorded in `scrape_runs` and the miss is invisible from inside the app.
+
+Warming ahead of the scrape rather than continuously is a cost decision as much as a
+correctness one. A ping every 10-15 minutes never lets the instance sleep, which spends
+~730 of the free tier's 750 monthly instance-hours on a service that needs to be awake
+twelve times a day; exhausting them suspends the service, and a suspended service answers
+with the same edge HTML as a sleeping one — the same symptom from the opposite cause.
+Pinging at `:50` and `:55` costs roughly 20 minutes of wake time per cycle instead of 120.
+It is also *more* reliable than a 15-minute interval, which races Render's ~15-minute idle
+timeout: cron-job.org fires with up to a minute of jitter, so consecutive pings can fall
+more than 15 minutes apart and let the instance sleep anyway.
+
+The scrape job additionally carries **2 retries, 60-120 s apart, with `409` counted as
+success**. A cold start or a deploy window is refused at the edge in well under a second,
+so the first attempt fails fast and also wakes the container; the retry a minute later
+finds it up. Without retries a single such blip costs an entire 2-hour cycle, and because
+the request never reaches Node, that miss leaves no trace in `scrape_runs` — the dashboard
+cannot tell you it happened. `409` must count as success or the retry reports a failure
+whenever it correctly collides with the first attempt's run lock.
 
 The scheduled caller uses `?async=1`, which acknowledges with `202` and runs the scrape
 in the background. A run takes 40–90 s while cron services cap a request at ~30 s, so a
