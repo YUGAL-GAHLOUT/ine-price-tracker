@@ -56,11 +56,15 @@ export default function Activity() {
         {recentLogs.length === 0 ? <Empty title="Nothing logged yet" /> : (
           <div className="table-scroll">
             <table>
-              <thead><tr><th>Started</th><th>Outcome</th><th>Attempts</th><th>Duration</th><th>Detail</th></tr></thead>
+              <thead><tr><th>Started</th><th>Product</th><th>Outcome</th><th>Attempts</th><th>Duration</th><th>Detail</th></tr></thead>
               <tbody>
                 {recentLogs.slice(0, 40).map((l) => (
                   <tr key={l.id}>
                     <td className="mono">{formatDateTime(l.started_at)}</td>
+                    <td>
+                      {l.product_name ?? <span className="muted">Unknown product</span>}
+                      {l.store_product_id && <div className="small muted mono">{l.store_product_id}</div>}
+                    </td>
                     <td><StatusBadge status={l.status} /></td>
                     <td>{l.attempts}</td>
                     <td className="muted">{formatDuration(l.duration_ms)}</td>
@@ -83,6 +87,7 @@ export default function Activity() {
           {alerts.map((a) => (
             <div className="result-item" key={a.id}>
               <div><span className="badge badge-muted">{humanFailureCode(a.type)}</span>
+                {a.product_name && <strong style={{ marginLeft: 10 }}>{a.product_name}</strong>}
                 <span style={{ marginLeft: 10 }}>{a.message}</span></div>
               <span className="small muted">{formatRelative(a.created_at)}</span>
             </div>
