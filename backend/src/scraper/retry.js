@@ -75,7 +75,9 @@ export async function retry(fn, { attempts = 3, baseMs = 1000, maxMs = 15000, on
       await onAttempt?.({ attempt, ok: false, error, durationMs: Date.now() - startedAt });
       if (error instanceof PermanentError) break;
       if (attempt < attempts) {
-        const serverAsked = error instanceof RateLimitError ? error.retryAfterMs : 0;
+        // Any error may carry retryAfterMs — HTTP 429 from fetch, or a rate limit
+        // the store rendered into the page during a browser scrape.
+        const serverAsked = Number(error?.retryAfterMs) || 0;
         // Jitter on top of Retry-After so parallel workers do not all wake together.
         const wait = serverAsked
           ? serverAsked + Math.floor(Math.random() * 400)

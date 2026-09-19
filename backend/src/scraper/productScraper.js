@@ -10,6 +10,7 @@ import { PermanentError, TimeoutError, withTimeout } from './retry.js';
 export const FailureCode = {
   NAVIGATION_FAILED: 'navigation_failed',
   PRICE_BLOCK_MISSING: 'price_block_missing',
+  RATE_LIMITED: 'rate_limited',
   REVEAL_GATE_FAILED: 'reveal_gate_failed',
   REVEAL_CLICK_FAILED: 'reveal_click_failed',
   REVEAL_TIMEOUT: 'reveal_timeout',
@@ -25,12 +26,34 @@ export const FailureCode = {
 };
 
 export class ScrapeError extends Error {
-  constructor(code, message, { permanent = false } = {}) {
+  constructor(code, message, { permanent = false, retryAfterMs = 0 } = {}) {
     super(message);
     this.name = 'ScrapeError';
     this.code = code;
     this.permanent = permanent;
+    // When set, retry() waits at least this long instead of its own backoff.
+    this.retryAfterMs = retryAfterMs;
   }
+}
+
+/** How long to wait out a rate limit before trying the product again. */
+const RATE_LIMIT_BACKOFF_MS = 30_000;
+
+/**
+ * The store rate-limits bursts, and says so in the page rather than in a status
+ * code we can see from here: the product page renders "Couldn't load this
+ * product: Error: product 429", and the price block renders "upstream 429".
+ *
+ * Retrying straight away just deepens the limit, so these are detected and given
+ * a long, explicit backoff.
+ */
+function rateLimitedIf(text, context) {
+  if (!/\b429\b|too many requests/i.test(text ?? '')) return null;
+  return new ScrapeError(
+    FailureCode.RATE_LIMITED,
+    `Store rate-limited us during ${context}: ${text.replace(/\s+/g, ' ').trim().slice(0, 160)}`,
+    { retryAfterMs: RATE_LIMIT_BACKOFF_MS },
+  );
 }
 
 /** Refuse to point the browser at anything other than the assigned mock store. */
@@ -179,10 +202,13 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
         // price block was missing, which hides the real cause (the product fetch
         // failing, a rate limit, or the SPA rendering an error state).
         const visible = (await page.locator('body').innerText().catch(() => '')) || '';
-        const snippet = visible.replace(/\s+/g, ' ').trim().slice(0, 160);
-        throw new ScrapeError(
-          FailureCode.PRICE_BLOCK_MISSING,
-          `Price block never rendered (${e.message.split('\n')[0]}). Page showed: ${snippet || '<empty>'}`,
+        throw (
+          rateLimitedIf(visible, 'page load') ??
+          new ScrapeError(
+            FailureCode.PRICE_BLOCK_MISSING,
+            `Price block never rendered (${e.message.split('\n')[0]}). Page showed: ` +
+              `${visible.replace(/\s+/g, ' ').trim().slice(0, 160) || '<empty>'}`,
+          )
         );
       }
 
@@ -227,7 +253,8 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
 
       if (phase === 'error') {
         const msg = (await block.innerText().catch(() => '')).replace(/\s+/g, ' ').slice(0, 200);
-        throw new ScrapeError(FailureCode.STORE_ERROR, `Store reported a price error: ${msg}`);
+        throw rateLimitedIf(msg, 'price reveal') ??
+          new ScrapeError(FailureCode.STORE_ERROR, `Store reported a price error: ${msg}`);
       }
       if (phase !== 'success') {
         throw new ScrapeError(FailureCode.REVEAL_TIMEOUT, 'Price never resolved to success or error');

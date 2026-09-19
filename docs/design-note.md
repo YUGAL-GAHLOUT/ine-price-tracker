@@ -137,6 +137,7 @@ success). Observed attempt-level failure modes, all handled:
 | `price_pending` | the figure was rendered as "Updating…" and is not final |
 | `reveal_click_failed` | the consent overlay re-appeared and intercepted the click |
 | `price_block_missing` | the product page did not render (error message captured in the log) |
+| `rate_limited` | the store returned 429; backs off 30 s rather than retrying immediately |
 
 Before the adaptive-wait fix the same test failed 1 pass in 5.
 
@@ -248,12 +249,26 @@ concurrency from 8 to 4, added re-sweep rounds over ids that genuinely failed, a
 the script **warn loudly and exit non-zero** on an incomplete sync. The re-run went
 1000 → 208 missed → 4 → 0, and now reports `Catalogue rows: 1000/1000`.
 
-**8. A real failure was mis-labelled `unknown`.** A `locator.click` timeout on the
+**8. The browser scraper ignored rate limits that the HTTP client already handled.**
+The first production run on Render scraped two products back to back and both failed
+after four attempts each. The scrape log gave the reason verbatim: *"Couldn't load this
+product: Error: product 429"* and *"upstream 429"*. The store rate-limits bursts — which
+the HTTP catalogue client had been taught to respect (mistake 7) — but the browser path
+treated a 429 like any other failure, burning four attempts in ~100 s and deepening the
+limit it was hitting. *Correction:* the store renders the 429 into the page rather than
+returning a status code we can see, so those strings are now detected and raised as
+`rate_limited` with an explicit 30 s `retryAfterMs`, which `retry()` honours over its own
+backoff; and products within a run are now spaced ~5 s apart, since back-to-back scraping
+was what provoked the limit in the first place. Worth noting that nothing dishonest was
+recorded during the failure — no history rows were written, and the diagnostic added in
+mistake 9 is what made the cause obvious in seconds rather than hours.
+
+**9. A real failure was mis-labelled `unknown`.** A `locator.click` timeout on the
 reveal button surfaced as an untyped error, which would have made the scrape log less
 useful precisely when it mattered. *Correction:* added a dedicated
 `reveal_click_failed` code.
 
-The pattern across all eight: every one was caught by **checking against the live site**
+The pattern across all nine: every one was caught by **checking against the live site**
 rather than by reasoning about it. Three of them — the decoy price, the random
 pagination and the silent 86% catalogue loss — produced *no error at all*; they would
 have shipped as quietly wrong data. Nothing here was verified by assumption.

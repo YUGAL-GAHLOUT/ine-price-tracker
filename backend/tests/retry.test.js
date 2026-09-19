@@ -110,3 +110,23 @@ describe('withTimeout', () => {
     );
   });
 });
+
+describe('retry — a rate limit carried on any error type', () => {
+  it('honours retryAfterMs on a plain error object', async () => {
+    // The browser scraper reports the store's 429 as a ScrapeError carrying
+    // retryAfterMs, not as a RateLimitError, so retry() must not type-check it.
+    let calls = 0;
+    const started = Date.now();
+    const r = await retry(async () => {
+      if (++calls === 1) {
+        const e = new Error('store rate-limited us');
+        e.retryAfterMs = 250;
+        throw e;
+      }
+      return 'ok';
+    }, { attempts: 3, baseMs: 1 });
+
+    assert.equal(r.ok, true);
+    assert.ok(Date.now() - started >= 250, 'should have waited for retryAfterMs');
+  });
+});

@@ -1,13 +1,16 @@
 import { config } from '../config/env.js';
 import { getBrowser } from '../scraper/browser.js';
 import { FailureCode, ScrapeError, scrapeProductOnce } from '../scraper/productScraper.js';
-import { retry } from '../scraper/retry.js';
+import { retry, sleep } from '../scraper/retry.js';
 import * as alertsRepo from '../db/repositories/alertsRepo.js';
 import * as historyRepo from '../db/repositories/historyRepo.js';
 import * as logsRepo from '../db/repositories/logsRepo.js';
 import * as runsRepo from '../db/repositories/runsRepo.js';
 import * as trackedRepo from '../db/repositories/trackedProductsRepo.js';
 import { logger } from '../utils/logger.js';
+
+/** Pause between products in a run, to stay under the store's rate limit. */
+const PRODUCT_GAP_MS = 5_000;
 
 /**
  * Scrape one tracked product, with retries, and record the outcome honestly.
@@ -177,7 +180,11 @@ export async function runScrape({ trigger = 'manual', products, headed = false, 
 
   async function worker() {
     while (cursor < products.length) {
-      const product = products[cursor++];
+      const index = cursor++;
+      const product = products[index];
+      // Space requests out. Scraping several products back to back is exactly what
+      // earns a 429 from the store, which then costs far more time than this wait.
+      if (index > 0) await sleep(PRODUCT_GAP_MS + Math.floor(Math.random() * 2_000));
       try {
         results.push(await scrapeOneProduct(browser, product, { runId: run.id, headed, onStep }));
       } catch (e) {

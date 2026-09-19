@@ -358,7 +358,7 @@ Errors use one shape:
 cd backend && npm test
 ```
 
-43 unit tests covering the parts where a bug would corrupt data silently:
+44 unit tests covering the parts where a bug would corrupt data silently:
 
 - **`parsePrice`** — all seven formats the store rotates through (default, spaced,
   European, trailing-text, full-width Unicode, NBSP, split-carrier with zero-width
@@ -465,7 +465,9 @@ Summarised here; the reasoning is in [`docs/design-note.md`](docs/design-note.md
    which genuinely require executing WASM and a proof-of-work.
 2. **Obey rate limits, and never mistake one for "not found".** The store answers bursts
    with `429` + `Retry-After`; that has its own error type, the server's delay is
-   honoured, and failed ids are re-swept rather than silently dropped.
+   honoured, and failed ids are re-swept rather than silently dropped. During a browser
+   scrape the store renders the 429 into the page instead, so that text is detected too
+   and backed off for 30 s, and products in a run are spaced ~5 s apart.
 3. **Never trust the obvious selector.** The store renders two *hidden decoy prices* on
    `.price-value` and `[data-price]`. The real element is located via the class the store
    publishes at `/api/layout`, with a structural fallback that raises a
