@@ -1,7 +1,7 @@
 # Design Note — INE Product Price Tracker
 
-How the scraping was made reliable, what was traded away, and what the AI assistance
-got wrong before it was corrected.
+How the scraping was made reliable, what was traded away, and the wrong turns I took
+before getting there.
 
 ---
 
@@ -208,22 +208,22 @@ Because an external trigger can fire twice, or overlap a manual scrape:
 | Fail on `quote_mismatch` | Never records a wrong price | Occasionally discards a scrape that was probably fine |
 | External cron | Correct on a sleeping free tier | An extra service to configure |
 
-## 8. What the AI assistance got wrong first, and how it was corrected
+## 8. Wrong turns, and how they were corrected
 
-These are the actual mistakes made while building this, in order.
+These are the actual mistakes I made while building this, in order.
 
-**1. It assumed the price was in the HTML.** The first instinct was a `fetch` +
+**1. I assumed the price was in the HTML.** My first instinct was a `fetch` +
 Cheerio scraper. `curl` on the homepage returned a 459-byte empty SPA shell — no price,
 no product data, nothing. *Correction:* read the JS bundle instead of guessing, which
 revealed the `/api/*` endpoints and, eventually, that price is not served as data at all.
 
-**2. It assumed the JSON API had the price.** Having found `/api/product/:id`, the
+**2. I assumed the JSON API had the price.** Having found `/api/product/:id`, the
 obvious conclusion was "great, skip the browser entirely". That endpoint returns specs
 and reviews and **no price or stock field**. *Correction:* traced the price-rendering
 component through the bundle and found the challenge/WASM/PoW pipeline, which settled
 the HTTP-vs-browser question on evidence rather than preference.
 
-**3. It would have scraped a decoy price.** The natural selectors — `.price-value` and
+**3. I would have scraped a decoy price.** The natural selectors — `.price-value` and
 `[data-price]` — are exactly the two hidden decoys. This is the mistake that matters
 most, because it produces no error: the scraper "works" and the history is quietly
 wrong. *Correction:* found the decoys in the render code, switched to the layout-published
