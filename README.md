@@ -346,7 +346,9 @@ scrape in the background; the run is still recorded honestly in `scrape_runs` an
 endpoint) when you want the full summary in the response.
 
 It reaps stale runs, takes the run lock, loads every active product whose interval has
-elapsed, scrapes them with bounded concurrency, writes history for the successes and a
+elapsed (with a 10-minute grace window — `last_scraped_at` is stamped when a scrape
+*finishes*, so a strict comparison would make the 08:00 run miss a product last scraped
+at 06:00:45 and quietly turn a 2-hourly schedule into a 4-hourly one), scrapes them with bounded concurrency, writes history for the successes and a
 log for every attempt, and returns a summary. A single product failing never aborts the
 run.
 

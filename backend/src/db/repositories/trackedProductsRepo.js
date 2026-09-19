@@ -6,7 +6,18 @@ export async function list() {
   return unwrap(await db.from('tracked_products').select(COLUMNS).order('created_at', { ascending: false }), 'list tracked') ?? [];
 }
 
-/** Active products whose configured interval has elapsed since the last attempt. */
+/**
+ * How much early a product may be scraped and still count as due.
+ *
+ * Without this, a 2-hourly schedule silently becomes a 4-hourly one. `last_scraped_at`
+ * is stamped when the scrape *finishes*, so the 08:00 run compares against 06:00:45
+ * — 1 h 59 m 15 s, just under the interval — skips the product, and the next chance
+ * is 10:00. The drift compounds every run. A grace window absorbs the run's own
+ * duration plus the cron service's jitter and cold-start delay.
+ */
+const DUE_GRACE_MS = 10 * 60_000;
+
+/** Active products whose configured interval has (near enough) elapsed. */
 export async function listDue({ ignoreInterval = false } = {}) {
   const rows = unwrap(
     await db.from('tracked_products').select(COLUMNS).eq('is_active', true).order('created_at'),
@@ -16,7 +27,8 @@ export async function listDue({ ignoreInterval = false } = {}) {
   const now = Date.now();
   return rows.filter((p) => {
     if (!p.last_scraped_at) return true;
-    return now - new Date(p.last_scraped_at).getTime() >= p.scrape_interval_minutes * 60_000;
+    const elapsed = now - new Date(p.last_scraped_at).getTime();
+    return elapsed >= p.scrape_interval_minutes * 60_000 - DUE_GRACE_MS;
   });
 }
 
