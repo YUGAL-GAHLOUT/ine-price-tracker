@@ -1,5 +1,14 @@
 # INE Product Price Tracker
 
+| | |
+|---|---|
+| **Live site** | https://ine-price-tracker.vercel.app |
+| **API** | https://ine-price-tracker-backend-vwt5.onrender.com |
+| **Repository** | https://github.com/YUGAL-GAHLOUT/ine-price-tracker |
+
+> The API runs on Render's free tier, which sleeps after inactivity. The first request
+> after a quiet period takes 30–60 s to wake it; everything after that is immediate.
+
 Tracks the price and stock of products from INE's mock storefront
 ([demo.inelabteamdev.com](https://demo.inelabteamdev.com)) on a **2-hourly schedule**,
 and records an honest history of what was observed — including the scrapes that failed.
