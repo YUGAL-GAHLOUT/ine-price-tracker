@@ -77,7 +77,7 @@ Four layers defend against that:
    full-width Unicode digits, NBSP-separated, and a "split" carrier that wraps every
    character in its own `<span>` with a zero-width space between. `parsePrice`
    normalises all of them and **returns `null` rather than guessing** on anything it
-   does not fully understand. Every format has a unit test.
+   does not fully understand.
 4. **Cross-check against the store's own figure.** The browser context hooks
    `TextDecoder.prototype.decode` and captures the quote object the page decrypts for
    itself. If the number parsed from the DOM disagrees with it, the scrape **fails**

@@ -11,7 +11,6 @@
     "scrape:headed": "node scripts/scrape-cli.js --headed --slow --all",
     "scrape:demo": "node scripts/scrape-cli.js --headed --slow --id 312 --repeat 5",
     "catalog:sync": "node scripts/sync-catalog.js",
-    "test": "node --test tests/*.test.js",
     "postinstall": "playwright install --with-deps chromium chromium-headless-shell || playwright install chromium chromium-headless-shell"
   },
   "dependencies": {

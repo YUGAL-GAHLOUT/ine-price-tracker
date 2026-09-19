@@ -53,7 +53,6 @@ simply stop running. An external caller both triggers the run and wakes the inst
 | Scraping | `fetch` for catalogue JSON · Playwright (Chromium) for price & stock |
 | Scheduling | cron-job.org → `POST /api/cron/scrape`, every 2 hours |
 | Validation | zod (API input) · hand-written parsers (scraped values) |
-| Tests | `node:test` |
 
 ## Project structure
 
@@ -242,31 +241,19 @@ Errors use one shape:
 
 ## Testing
 
-```bash
-cd backend && npm test
-```
-
-44 unit tests, concentrated where a bug would corrupt data silently: all seven price
-formats the store rotates through (spaced, European, full-width Unicode, NBSP,
-split-carrier with zero-width spaces…), lakh grouping and genuine paise, plus rejection of
-empty, non-numeric, zero and absurd values; the five in-stock phrasings and the critical
-case that a **missing or unrecognised badge is a failure, not "out of stock"**; retry
-recovery, bounded give-up, `PermanentError` short-circuit, backoff growth, cap and genuine
-jitter, and that every attempt is reported so a log can show failures preceding a success;
-`Retry-After` honoured over our own backoff, with 429 as its own type so it is never
-mistaken for "product not found"; `withTimeout` rejecting a promise that never settles; and
-a target guard so only `demo.inelabteamdev.com` URLs can be produced.
-
-Integration testing against the live store is the one that matters:
+Verification is against the live store, which is the only environment that reproduces its
+faults — rotating price formats, decoy selectors, dropped callbacks and rate limiting:
 
 ```bash
+cd backend
 node scripts/scrape-cli.js --id 88 --repeat 12
 ```
 
-Most recent measured result: **26/26 passes produced a validated observation** across runs
-of 8, 6 and 12, with 14 individual attempts failing and recovered by retry. CI runs the
-unit tests and a production frontend build on every push; a scheduled workflow smoke-tests
-the scraper against the live store daily.
+The run prints every attempt and its outcome, so retries and recovered failures are visible
+as they happen. Most recent measured result: **26/26 passes produced a validated
+observation** across runs of 8, 6 and 12, with 14 individual attempts failing and recovered
+by retry. CI builds the production frontend on every push, and a scheduled workflow
+smoke-tests the scraper against the live store daily.
 
 ## Deployment
 
