@@ -174,8 +174,15 @@ A bug that tried to log a failure as a success would be rejected by the database
 Render's free tier sleeps, so an in-process `setInterval` would simply stop running —
 and would also be wrong on a restart. Scheduling is therefore external:
 **cron-job.org calls `POST /api/cron/scrape` every 2 hours**, authenticated with a
-shared secret compared in constant time. The inbound request doubles as the keep-warm
-ping that wakes the instance.
+shared secret compared in constant time, plus a second unauthenticated job hitting
+`GET /api/health` every 10 minutes as the keep-warm ping.
+
+The keep-warm ping must target `/api/health`, not `/api/status`: `/api/status` carries
+recent runs, logs and alerts (~26 KB) and exceeds cron-job.org's response cap, so it fails
+on every run and the job is eventually disabled. The instance then goes cold, and a
+scheduled scrape arriving at a spun-down service is answered by Render's edge
+(`x-render-routing: no-deploy`) with an HTML error page — the request never reaches Node,
+so nothing is recorded in `scrape_runs` and the miss is invisible from inside the app.
 
 The scheduled caller uses `?async=1`, which acknowledges with `202` and runs the scrape
 in the background. A run takes 40–90 s while cron services cap a request at ~30 s, so a

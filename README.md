@@ -207,7 +207,11 @@ One product failing never aborts the run.
 
 On cron-job.org: `POST` every 2 hours to `.../api/cron/scrape?async=1` with header
 `Authorization: Bearer <CRON_SECRET>`, request timeout raised to 30 s for the Render cold
-start. A second job hitting `GET /api/status` every 10 minutes keeps the instance warm.
+start. A second job hitting `GET /api/health` every 10 minutes keeps the instance warm.
+Use `/api/health` (35 bytes), **not** `/api/status` — the latter returns recent runs, logs
+and alerts (~26 KB), which exceeds cron-job.org's response cap. That fails the job every
+run, and a job that keeps failing gets disabled — leaving the instance cold, so the next
+scheduled scrape hits a spun-down service and returns Render's HTML error page instead.
 
 ### Manual scraping
 
