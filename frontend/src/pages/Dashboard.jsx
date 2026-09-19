@@ -39,9 +39,10 @@ export default function Dashboard() {
       <ErrorBox error={actionError} />
       {!hasScrapeSecret && (
         <div className="notice">
-          Manual scraping is disabled in this build because no scrape secret is bundled
-          (it would be public). Scrapes run on the 2-hourly cron schedule, or via
-          <span className="mono"> npm run scrape:once</span> on the backend.
+          Manual scraping is not enabled in this build (no
+          <span className="mono"> VITE_MANUAL_SCRAPE_TOKEN</span>). Scrapes run on the
+          2-hourly cron schedule, or via <span className="mono">npm run scrape:once</span>
+          on the backend.
         </div>
       )}
 
@@ -94,7 +95,10 @@ export default function Dashboard() {
               <div className="row" style={{ marginTop: 10 }}>
                 <Link className="btn btn-sm" to={`/products/${p.id}`}>History &amp; logs</Link>
                 {hasScrapeSecret && (
-                  <button className="btn btn-sm" disabled={busyId === p.id} onClick={() => scrapeNow(p.id)}>
+                  /* Every button is disabled while any scrape is in flight: the
+                     backend holds a single run lock, so a second click would only
+                     earn a 409. */
+                  <button className="btn btn-sm" disabled={busyId !== null} onClick={() => scrapeNow(p.id)}>
                     {busyId === p.id ? 'Scraping…' : 'Scrape now'}
                   </button>
                 )}

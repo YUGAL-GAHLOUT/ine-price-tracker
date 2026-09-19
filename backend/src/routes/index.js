@@ -2,7 +2,7 @@ import { Router } from 'express';
 import * as products from '../controllers/productsController.js';
 import * as tracked from '../controllers/trackedProductsController.js';
 import * as cron from '../controllers/cronController.js';
-import { requireScrapeSecret } from '../middleware/auth.js';
+import { allowManualScrape, requireScrapeSecret } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 import { rateLimit } from '../middleware/rateLimit.js';
 
@@ -28,10 +28,11 @@ router.get('/tracked-products/:id/history', validate(tracked.idSchema, 'params')
 router.get('/tracked-products/:id/logs', validate(tracked.idSchema, 'params'), tracked.logs);
 router.get('/tracked-products/:id/alerts', validate(tracked.idSchema, 'params'), tracked.alerts);
 
-// Triggering a scrape costs a browser, so it needs the shared secret.
+// Manual re-scrape of one ALREADY-TRACKED product. Accepts the full cron secret
+// or the low-privilege MANUAL_SCRAPE_TOKEN the dashboard holds. See auth.js.
 router.post(
   '/tracked-products/:id/scrape',
-  requireScrapeSecret,
+  allowManualScrape,
   validate(tracked.idSchema, 'params'),
   tracked.scrapeNow,
 );

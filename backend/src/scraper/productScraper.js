@@ -307,6 +307,10 @@ export async function scrapeProductOnce(browser, product, { timeoutMs = 60_000, 
         seller: quote?.sl ?? null,
         rating: quote?.r ?? null,
         priceSource: dom.priceSource,
+        // Whether `/api/layout` actually answered. Falling back to structural
+        // matching only means "the store changed shape" if we HAD the layout to
+        // compare against; if the fetch was rate-limited we simply never knew.
+        layoutKnown: !!dom.layout?.classes?.priceValue,
         crossChecked: verified,
         layoutRevision: dom.layout?.revision ?? null,
         layoutVariant: dom.layout?.variant ?? null,

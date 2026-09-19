@@ -68,7 +68,10 @@ Four layers defend against that:
 2. **Structural fallback.** If the layout class is missing, the price is found by the
    only inline style that identifies it (`font-size: 2.4rem; font-weight: 700`) among
    the *visible*, non-`aria-hidden` children of `.price-main`. Using this fallback is
-   recorded as `price_source = 'structural'` and raises a `structure_change` alert.
+   recorded as `price_source = 'structural'`. It raises a `structure_change` alert only
+   when `/api/layout` actually answered and its class still did not match — if the
+   layout fetch was rate-limited we never knew what to expect, and alerting there would
+   be a false alarm on an otherwise perfect scrape.
 3. **Format-tolerant parsing.** The store rotates through seven price renderings —
    `₹25,739`, `₹25 739`, `₹25.739,00` (European), `₹25,739/- (incl. of all taxes)`,
    full-width Unicode digits, NBSP-separated, and a "split" carrier that wraps every
@@ -294,6 +297,10 @@ have shipped as quietly wrong data. Nothing here was verified by assumption.
 - Concurrency of 2 means a large number of tracked products lengthens the run
   substantially. Beyond ~20 products the 2-hour cadence would need a bigger instance.
 - Alerts are recorded in-app only. Email delivery (SendGrid) was not implemented.
-- There is no authentication: anyone reaching the deployed API can read and track
-  products. The endpoints that *cost* something (any scrape trigger) are secret-protected;
-  the read endpoints are deliberately open for the evaluator's convenience.
+- There is no user authentication: anyone reaching the deployed API can read and track
+  products. The endpoints that *cost* something are credential-protected, and the two
+  capabilities are split so the browser never holds the powerful one: `CRON_SECRET`
+  (server-side only) triggers full scheduled runs, while `MANUAL_SCRAPE_TOKEN` — which
+  is bundled into the public frontend build — can only re-scrape an already-tracked
+  product, is rate limited per IP, and is bounded by the global run lock. The read
+  endpoints are deliberately open for the evaluator's convenience.

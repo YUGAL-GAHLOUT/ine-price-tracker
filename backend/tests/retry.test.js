@@ -130,3 +130,15 @@ describe('retry — a rate limit carried on any error type', () => {
     assert.ok(Date.now() - started >= 250, 'should have waited for retryAfterMs');
   });
 });
+
+describe('retry — errors flagged permanent', () => {
+  it('stops immediately instead of using the whole attempt budget', async () => {
+    let calls = 0;
+    const result = await retry(
+      () => { const e = new Error('invalid id'); e.permanent = true; calls++; throw e; },
+      { attempts: 4, baseMs: 1 },
+    );
+    assert.equal(result.ok, false);
+    assert.equal(calls, 1, 'a permanent failure must not be retried');
+  });
+});

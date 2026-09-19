@@ -1,6 +1,6 @@
 import { api, apiBaseUrl } from '../lib/api.js';
 import { useAsync } from '../lib/useAsync.js';
-import { formatDateTime, formatDuration, formatRelative, humanFailureCode } from '../lib/format.js';
+import { formatDateTime, formatDuration, formatPrice, formatRelative, humanFailureCode } from '../lib/format.js';
 import { Empty, ErrorBox, Loading, StatusBadge } from '../components/ui.jsx';
 
 /** Cross-product view of scrape runs, so the health of the scheduler is visible. */
@@ -67,7 +67,7 @@ export default function Activity() {
                     <td>
                       {l.status === 'failed'
                         ? <span style={{ color: 'var(--danger)' }}>{humanFailureCode(l.failure_code)}</span>
-                        : <span className="muted">₹{l.scraped_price} · {l.scraped_stock} in stock</span>}
+                        : <span className="muted">{formatPrice(Number(l.scraped_price))} · {l.scraped_stock} in stock</span>}
                     </td>
                   </tr>
                 ))}

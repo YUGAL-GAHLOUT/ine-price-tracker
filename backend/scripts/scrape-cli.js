@@ -3,7 +3,8 @@
  * Run the real scraper from the command line.
  *
  *   npm run scrape:once                  # headless, all due tracked products
- *   npm run scrape:headed                # visible browser, slowed down (for the demo recording)
+ *   npm run scrape:demo                  # visible browser, 5 dry-run passes — NO database needed
+ *   npm run scrape:headed                # visible browser, every active tracked product (writes to DB)
  *   node scripts/scrape-cli.js --id 88   # scrape one store product id, no DB writes
  *   node scripts/scrape-cli.js --headed --id 88 --repeat 4
  *
@@ -77,9 +78,14 @@ const trackedRepo = await import('../src/db/repositories/trackedProductsRepo.js'
 
 const products = await trackedRepo.listDue({ ignoreInterval: has('--all') });
 if (!products.length) {
-  log('No tracked products are due. Use --all to scrape every active product.');
+  // Exit loudly. Silently doing nothing here is how a demo run turns into a
+  // blank terminal: after a cron run nothing is "due" for another 2 hours.
+  log(has('--all')
+    ? 'No ACTIVE tracked products exist. Track one in the dashboard first.'
+    : 'No tracked products are due (their 2-hour interval has not elapsed). '
+      + 'Re-run with --all, or use `npm run scrape:demo` for a database-free headed run.');
   await closeBrowser();
-  process.exit(0);
+  process.exit(2);
 }
 
 log(`Scraping ${products.length} product(s), headed=${headed}`);
@@ -90,6 +96,13 @@ const summary = await runScrape({
   slowMo,
   onStep: ({ attempt, step }) => log(`  attempt ${attempt} · ${step}`),
 });
+
+if (summary.skipped) {
+  // Another run holds the lock (a cron trigger landed at the same moment).
+  log(`SKIPPED: ${summary.reason}. Wait for it to finish, or use \`npm run scrape:demo\`.`);
+  await closeBrowser();
+  process.exit(3);
+}
 
 log(JSON.stringify(summary, null, 2));
 await closeBrowser();

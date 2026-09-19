@@ -90,9 +90,18 @@ export const alerts = asyncHandler(async (req, res) => {
   res.json({ items: await alertsRepo.listForProduct(product.id) });
 });
 
-/** Manual scrape of a single product. Protected by the same secret as cron. */
+/**
+ * Manual scrape of a single product, triggered from the dashboard.
+ *
+ * This holds an HTTP request open while a browser works, so it runs on a reduced
+ * retry budget: 3 attempts of at most 45 s bounds the response at roughly 2.5
+ * minutes even in the worst case, instead of the ~6 minutes the scheduled budget
+ * allows. The scheduled run — where nobody is waiting — keeps the full budget.
+ */
+const INTERACTIVE_BUDGET = { maxAttempts: 3, attemptTimeoutMs: 45_000 };
+
 export const scrapeNow = asyncHandler(async (req, res) => {
   const product = await trackingService.getTrackedOrThrow(req.params.id);
-  const summary = await runScrape({ trigger: 'manual', products: [product] });
+  const summary = await runScrape({ trigger: 'manual', products: [product], budget: INTERACTIVE_BUDGET });
   res.status(summary.skipped ? 409 : 200).json(summary);
 });

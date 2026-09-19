@@ -13,6 +13,26 @@ import { logger } from '../utils/logger.js';
 const PRODUCT_GAP_MS = 5_000;
 
 /**
+ * The run currently holding the lock, if any.
+ *
+ * Render restarts (deploys, free-tier sleep, OOM) can kill the process mid-run.
+ * `reapStale` eventually frees an abandoned lock, but "eventually" is 20 minutes
+ * during which every scrape is refused — long enough to ruin a demo. When we get
+ * a SIGTERM we know the run is dying, so we say so immediately instead.
+ */
+let activeRunId = null;
+
+export async function releaseActiveRun(notes = 'Interrupted: process shut down mid-run') {
+  const id = activeRunId;
+  activeRunId = null;
+  if (!id) return false;
+  await runsRepo.finish(id, { status: 'failed', productsTotal: 0, productsSuccess: 0, productsFailed: 0, notes })
+    .catch((e) => logger.error('scrape.run.release_failed', { runId: id, error: e.message }));
+  logger.warn('scrape.run.released', { runId: id });
+  return true;
+}
+
+/**
  * Scrape one tracked product, with retries, and record the outcome honestly.
  *
  * Guarantees:
@@ -21,20 +41,22 @@ const PRODUCT_GAP_MS = 5_000;
  *    and (where available) was cross-checked against the store's own figure;
  *  - a failure never overwrites or corrupts the last known good price.
  */
-export async function scrapeOneProduct(browser, product, { runId = null, headed = false, onStep } = {}) {
+export async function scrapeOneProduct(browser, product, { runId = null, headed = false, onStep, budget } = {}) {
   const startedAt = new Date();
   const trail = [];
+  const maxAttempts = budget?.maxAttempts ?? config.scraper.maxAttempts;
+  const attemptTimeoutMs = Math.min(budget?.attemptTimeoutMs ?? Infinity, config.scraper.attemptTimeoutMs);
 
   const result = await retry(
     (attempt) => {
       logger.info('scrape.attempt', { product: product.store_product_id, attempt });
       return scrapeProductOnce(browser, product, {
-        timeoutMs: config.scraper.attemptTimeoutMs,
+        timeoutMs: attemptTimeoutMs,
         onStep: (step, meta) => onStep?.({ attempt, step, meta }),
       });
     },
     {
-      attempts: config.scraper.maxAttempts,
+      attempts: maxAttempts,
       baseMs: config.scraper.retryBaseMs,
       maxMs: config.scraper.retryMaxMs,
       onAttempt: ({ attempt, ok, error, durationMs }) => {
@@ -147,9 +169,11 @@ async function raiseAlerts(product, previous, obs) {
     });
   }
 
-  // We only found the price by falling back to structural matching, which means
-  // the layout classes we expected were not there. Worth surfacing.
-  if (obs.priceSource === 'structural') {
+  // We only found the price by falling back to structural matching *while we knew
+  // what class to expect* — that is a genuine shape change. If `/api/layout` was
+  // rate-limited we had nothing to compare against, and claiming a structure
+  // change there would be a false alarm on a perfectly good scrape.
+  if (obs.priceSource === 'structural' && obs.layoutKnown) {
     await alertsRepo.insert({
       tracked_product_id: product.id, type: 'structure_change',
       message: 'Price element was not found via the layout class; used structural fallback.',
@@ -163,8 +187,12 @@ async function raiseAlerts(product, previous, obs) {
  * One failing product must never abort the run, so each task is individually
  * guarded — `scrapeOneProduct` already logs its own failure, and anything that
  * escapes it is caught here.
+ *
+ * `budget` caps the retry effort for an INTERACTIVE run (the dashboard's "Scrape
+ * now"), where somebody is watching a spinner and an HTTP request is being held
+ * open. Scheduled runs pass nothing and keep the full, more patient budget.
  */
-export async function runScrape({ trigger = 'manual', products, headed = false, slowMo = 0, onStep } = {}) {
+export async function runScrape({ trigger = 'manual', products, headed = false, slowMo = 0, onStep, budget } = {}) {
   await runsRepo.reapStale(config.scraper.runLockStaleMs);
 
   const { conflict, run } = await runsRepo.start(trigger);
@@ -173,6 +201,7 @@ export async function runScrape({ trigger = 'manual', products, headed = false, 
     return { skipped: true, reason: 'a scrape run is already in progress', results: [] };
   }
 
+  activeRunId = run.id;
   const browser = await getBrowser({ headed, slowMo });
   const results = [];
   let cursor = 0;
@@ -186,7 +215,7 @@ export async function runScrape({ trigger = 'manual', products, headed = false, 
       // earns a 429 from the store, which then costs far more time than this wait.
       if (index > 0) await sleep(PRODUCT_GAP_MS + Math.floor(Math.random() * 2_000));
       try {
-        results.push(await scrapeOneProduct(browser, product, { runId: run.id, headed, onStep }));
+        results.push(await scrapeOneProduct(browser, product, { runId: run.id, headed, onStep, budget }));
       } catch (e) {
         logger.error('scrape.product.crashed', { product: product.store_product_id, error: e.message });
         results.push({ ok: false, product, failureCode: 'orchestrator_error', error: e.message, attempts: 0 });
@@ -201,6 +230,7 @@ export async function runScrape({ trigger = 'manual', products, headed = false, 
     status = 'failed';
     logger.error('scrape.run.failed', { error: e.message });
   } finally {
+    activeRunId = null;
     const success = results.filter((r) => r.ok).length;
     await runsRepo.finish(run.id, {
       status,

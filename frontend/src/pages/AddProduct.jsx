@@ -11,8 +11,10 @@ export default function AddProduct() {
   const [trackError, setTrackError] = useState(null);
 
   async function search(e) {
-    e.preventDefault();
-    if (!query.trim()) return;
+    e?.preventDefault();
+    // Guard against a double submit: Enter while a search is already running
+    // would fire a second identical request and race the first one's result.
+    if (!query.trim() || state.loading) return;
     setState({ loading: true, error: null, result: null });
     setTrackError(null);
     try {
@@ -50,6 +52,10 @@ export default function AddProduct() {
             className="input" style={{ flex: '1 1 260px' }}
             placeholder="e.g. helix, receiver, Vista Monitor Studio, HEL-10088"
             value={query} onChange={(e) => setQuery(e.target.value)} autoFocus
+            // Enter is how people actually search. Handled explicitly rather than
+            // relying on the form's implicit submission, which does not fire in
+            // every browser once the submit button has been disabled and re-enabled.
+            onKeyDown={(e) => { if (e.key === 'Enter') search(e); }}
           />
           <button className="btn btn-primary" type="submit" disabled={state.loading || !query.trim()}>
             {state.loading ? 'Searching…' : 'Search'}

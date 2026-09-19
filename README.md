@@ -203,7 +203,8 @@ constraint stock_consistent   check (in_stock = (stock_quantity > 0))
 |---|---|---|---|
 | `SUPABASE_URL` | ✅ | — | Supabase project URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | ✅ | — | Service-role key. **Backend only — never expose** |
-| `CRON_SECRET` | ✅ | — | Shared secret for every scrape-triggering endpoint. `openssl rand -hex 32` |
+| `CRON_SECRET` | ✅ | — | Full scrape-trigger rights (cron endpoint + CLI + curl). **Server-side only.** `openssl rand -hex 32` |
+| `MANUAL_SCRAPE_TOKEN` | | — | Low-privilege token enabling the dashboard's "Scrape now" button. May re-scrape one *already-tracked* product and nothing else; rate limited to 6 req/10 min per IP. **Must differ from `CRON_SECRET`** (the server refuses to start otherwise), because this value is bundled into the public frontend build. Unset ⇒ button hidden. `openssl rand -hex 24` |
 | `PORT` | | `8080` | HTTP port (Render sets this automatically) |
 | `NODE_ENV` | | `development` | `production` hides internal error details |
 | `CORS_ORIGINS` | | `*` | Comma-separated allowed origins; set to your Vercel URL in production |
@@ -220,7 +221,7 @@ constraint stock_consistent   check (in_stock = (stock_quantity > 0))
 | Variable | Required | Purpose |
 |---|---|---|
 | `VITE_API_BASE_URL` | ✅ | Backend base URL, no trailing slash |
-| `VITE_SCRAPE_SECRET` | | Enables the in-app "Scrape now" button. **Anything `VITE_`-prefixed is bundled into public JavaScript** — leave this empty in production and scrape via cron or the CLI. The UI hides the button and explains why when it is unset. |
+| `VITE_MANUAL_SCRAPE_TOKEN` | | Enables the in-app "Scrape now" button. Must equal the backend's `MANUAL_SCRAPE_TOKEN`. **Anything `VITE_`-prefixed is bundled into public JavaScript**, which is exactly why this is a separate, deliberately weak credential — it can only re-scrape a product that is already tracked. **Never put `CRON_SECRET` here.** Unset ⇒ the UI hides the button and explains why. |
 
 Real credentials go in `.env`, which is git-ignored. Only `.env.example` is committed.
 
@@ -263,12 +264,22 @@ node scripts/scrape-cli.js --id 88 --repeat 5     # exercise retries and failure
 
 ```bash
 cd backend
-npm run scrape:headed                                   # visible browser, slowed down
-node scripts/scrape-cli.js --headed --slow --id 88 --repeat 4   # dry run, no DB needed
+
+# ▶ The one to use for the demo / recording.
+#   Visible Chromium, 5 passes against one product, NO database required,
+#   nothing persisted — so it works identically on any machine, every time.
+npm run scrape:demo
+
+# Visible Chromium over every active tracked product, writing to Supabase.
+# Requires backend/.env and at least one tracked product.
+npm run scrape:headed
+
+# Any product / pass count you like
+node scripts/scrape-cli.js --headed --slow --id 88 --repeat 4
 ```
 
-`scrape:headed` opens a real Chromium window with `slowMo` so each step is watchable,
-and logs every step with a timestamp:
+Both open a real Chromium window with `slowMo` so each step is watchable, and log
+every step with a timestamp:
 
 ```
 [18:55:24.557] ──── pass 4/8 ────
@@ -283,7 +294,7 @@ and logs every step with a timestamp:
 [18:55:32.784]   RESULT price=₹25739 stock=32 inStock=true source=layout_class crossChecked=true
 ```
 
-**For the 2–4 minute demo recording**, use `--repeat 5` or more. The store fails or
+**For the 2–4 minute demo recording**, `npm run scrape:demo` (5 passes) or more. The store fails or
 stalls roughly a third of price loads, so a handful of passes reliably shows a slow
 response, a failed attempt, the backoff, and a successful retry — plus a run that
 exhausts its attempts and is recorded as a failure with **nothing written to history**.
@@ -292,15 +303,31 @@ Production always runs headless; headed mode is a development and demonstration 
 
 ## 11. Manual scraping
 
-Protected by `CRON_SECRET`, so the endpoint is not a free browser for the internet.
+The endpoint is never an open browser for the internet. It takes either credential:
 
 ```bash
+# Full rights (also drives the cron endpoint) — server-side only
 curl -X POST http://localhost:8080/api/tracked-products/<uuid>/scrape \
   -H "Authorization: Bearer $CRON_SECRET"
+
+# Low-privilege token — what the dashboard button uses
+curl -X POST http://localhost:8080/api/tracked-products/<uuid>/scrape \
+  -H "Authorization: Bearer $MANUAL_SCRAPE_TOKEN"
 ```
 
-The dashboard also shows a **Scrape now** button, but only when `VITE_SCRAPE_SECRET` is
-set (i.e. local/demo builds). Otherwise it explains why the button is hidden.
+**Why two credentials.** Anything the browser sends must be baked into the Vite
+bundle, which is public. Shipping `CRON_SECRET` there would hand the scheduled-scrape
+endpoint to anyone who opened DevTools. So the two capabilities are split:
+`CRON_SECRET` triggers full runs and never leaves the server;
+`MANUAL_SCRAPE_TOKEN` can only re-scrape a product that is *already tracked*, is rate
+limited to 6 requests per 10 minutes per IP, and is additionally bounded by the global
+run lock (a concurrent request gets `409`, not a second browser). The server refuses to
+start if the two are set to the same value.
+
+An interactive scrape also runs on a reduced retry budget (3 attempts × 45 s) so the
+request cannot hold a spinner open for minutes; the scheduled run keeps the full,
+more patient budget. The frontend aborts after 3 minutes with a message telling you the
+scrape may still be running server-side.
 
 ## 12. Scheduled scraping (every 2 hours)
 
@@ -347,6 +374,7 @@ bad or missing secret.
 ## 13. API reference
 
 All routes are prefixed `/api`. 🔒 = requires `Authorization: Bearer <CRON_SECRET>`.
+🔑 = accepts `CRON_SECRET` **or** the low-privilege `MANUAL_SCRAPE_TOKEN` ([§11](#11-manual-scraping)).
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -361,7 +389,7 @@ All routes are prefixed `/api`. 🔒 = requires `Authorization: Bearer <CRON_SEC
 | `GET` | `/tracked-products/:id/history` | Price + stock history, oldest first (chart-ready) |
 | `GET` | `/tracked-products/:id/logs` | Scrape log with per-attempt trail |
 | `GET` | `/tracked-products/:id/alerts` | Alerts for this product |
-| `POST` | `/tracked-products/:id/scrape` | 🔒 Scrape one product now |
+| `POST` | `/tracked-products/:id/scrape` | 🔑 Scrape one already-tracked product now (rate limited; reduced retry budget) |
 | `POST` `GET` | `/cron/scrape` | 🔒 Scheduled run. `?async=1` returns 202 and runs in the background (use this for cron); `?force=1` ignores intervals |
 
 Errors use one shape:
@@ -455,9 +483,13 @@ npm run catalog:sync
 | Build command | `npm run build` |
 | Output directory | `dist` |
 
-Set `VITE_API_BASE_URL` to your Render URL. Leave `VITE_SCRAPE_SECRET` **unset** in
-production. [`frontend/vercel.json`](frontend/vercel.json) adds the SPA rewrite so deep
-links work.
+Set `VITE_API_BASE_URL` to your Render URL. Set `VITE_MANUAL_SCRAPE_TOKEN` to the same
+value as the backend's `MANUAL_SCRAPE_TOKEN` if you want the in-app **Scrape now**
+button; **never** put `CRON_SECRET` here — see [§11](#11-manual-scraping).
+[`frontend/vercel.json`](frontend/vercel.json) adds the SPA rewrite so deep links work.
+
+> Vercel bakes env vars in at **build** time, so after changing one you must
+> **redeploy** for it to take effect.
 
 ### Cron → cron-job.org
 
@@ -471,6 +503,8 @@ curl "https://<render>.onrender.com/api/products/search?q=helix"    # → matche
 curl -X POST https://<render>.onrender.com/api/cron/scrape \
      -H "Authorization: Bearer $CRON_SECRET"                        # → run summary
 curl -X POST https://<render>.onrender.com/api/cron/scrape          # → 401 (secret works)
+curl -X POST https://<render>.onrender.com/api/cron/scrape \
+     -H "Authorization: Bearer $MANUAL_SCRAPE_TOKEN"                # → 401 (privilege split works)
 ```
 
 Then load the Vercel URL and confirm the dashboard populates (CORS is correct).

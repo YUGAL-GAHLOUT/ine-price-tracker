@@ -26,6 +26,14 @@ export const config = {
 
   cronSecret: required('CRON_SECRET'),
 
+  /**
+   * Low-privilege token for the dashboard's "Scrape now" button: it may re-scrape
+   * one already-tracked product and nothing else. Optional — when unset, the
+   * button is simply not offered. MUST be different from CRON_SECRET, because
+   * this one is bundled into the public frontend build.
+   */
+  manualScrapeToken: process.env.MANUAL_SCRAPE_TOKEN ?? '',
+
   scraper: {
     /** Attempts per product per run, including the first. */
     maxAttempts: int('SCRAPE_MAX_ATTEMPTS', 4),
@@ -40,5 +48,11 @@ export const config = {
     runLockStaleMs: int('SCRAPE_RUN_LOCK_STALE_MS', 20 * 60_000),
   },
 };
+
+// Fail fast on the one misconfiguration that would defeat the whole split: the
+// browser-visible token being the same string as the server-only cron secret.
+if (config.manualScrapeToken && config.manualScrapeToken === config.cronSecret) {
+  throw new Error('MANUAL_SCRAPE_TOKEN must not be the same value as CRON_SECRET: it is bundled into the public frontend build.');
+}
 
 export const isProd = config.nodeEnv === 'production';

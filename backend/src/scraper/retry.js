@@ -73,7 +73,10 @@ export async function retry(fn, { attempts = 3, baseMs = 1000, maxMs = 15000, on
     } catch (error) {
       lastError = error;
       await onAttempt?.({ attempt, ok: false, error, durationMs: Date.now() - startedAt });
-      if (error instanceof PermanentError) break;
+      // `permanent` covers wrapped errors too: the scraper re-throws a
+      // PermanentError as a ScrapeError carrying the flag, and retrying an
+      // invalid product id four times just burns the run's budget.
+      if (error instanceof PermanentError || error?.permanent === true) break;
       if (attempt < attempts) {
         // Any error may carry retryAfterMs — HTTP 429 from fetch, or a rate limit
         // the store rendered into the page during a browser scrape.

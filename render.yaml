@@ -28,5 +28,10 @@ services:
         sync: false
       - key: CRON_SECRET
         sync: false
+      # Low-privilege token for the dashboard's "Scrape now" button. Must be a
+      # DIFFERENT value from CRON_SECRET (it is bundled into the public frontend
+      # build as VITE_MANUAL_SCRAPE_TOKEN). Leave unset to disable the button.
+      - key: MANUAL_SCRAPE_TOKEN
+        sync: false
       - key: CORS_ORIGINS
         sync: false
