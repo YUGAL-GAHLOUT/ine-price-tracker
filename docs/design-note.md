@@ -174,6 +174,13 @@ and would also be wrong on a restart. Scheduling is therefore external:
 shared secret compared in constant time. The inbound request doubles as the keep-warm
 ping that wakes the instance.
 
+The scheduled caller uses `?async=1`, which acknowledges with `202` and runs the scrape
+in the background. A run takes 40–90 s while cron services cap a request at ~30 s, so a
+synchronous endpoint would be logged as a failure on every single run — and cron-job.org
+**disables** a job that keeps failing. That would have stopped the schedule silently,
+which is the exact failure mode the assignment warns about. Only the HTTP acknowledgement
+is early: the run is still recorded in full in `scrape_runs` and `scrape_logs`.
+
 Because an external trigger can fire twice, or overlap a manual scrape:
 
 - A partial unique index (`scrape_runs_single_active`) permits **one `running` row at a

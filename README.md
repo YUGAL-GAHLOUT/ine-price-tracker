@@ -307,8 +307,16 @@ set (i.e. local/demo builds). Otherwise it explains why the button is hidden.
 The backend exposes a cron endpoint instead of running an internal timer:
 
 ```
-POST /api/cron/scrape        Authorization: Bearer <CRON_SECRET>
+POST /api/cron/scrape?async=1     Authorization: Bearer <CRON_SECRET>
 ```
+
+**Use `?async=1` for the scheduled caller.** A full run takes 40–90 s but cron services
+cap a request at ~30 s, so a synchronous call would be logged as a failure on *every*
+run — and cron-job.org disables a job that keeps failing, silently stopping the
+schedule. With `async=1` the endpoint returns `202 Accepted` immediately and runs the
+scrape in the background; the run is still recorded honestly in `scrape_runs` and
+`scrape_logs`, so the dashboard remains the source of truth. Omit it (or use the manual
+endpoint) when you want the full summary in the response.
 
 It reaps stale runs, takes the run lock, loads every active product whose interval has
 elapsed, scrapes them with bounded concurrency, writes history for the successes and a
@@ -318,19 +326,20 @@ run.
 ### Configuring cron-job.org
 
 1. Sign in at [cron-job.org](https://cron-job.org) → **Create cronjob**.
-2. **URL:** `https://<your-render-service>.onrender.com/api/cron/scrape`
+2. **URL:** `https://<your-render-service>.onrender.com/api/cron/scrape?async=1`
 3. **Schedule:** *Every 2 hours* — or custom: minutes `0`, hours
    `0,2,4,6,8,10,12,14,16,18,20,22`.
 4. **Request method:** `POST`
 5. **Headers:** `Authorization: Bearer <your CRON_SECRET>`
-6. **Advanced → Request timeout:** raise it to the maximum (30 s). Render free-tier cold
-   starts take 30–60 s, so the *first* call after an idle period may time out from
-   cron's perspective while the run still completes server-side. Treat occasional
-   timeouts as expected; the `Activity` page shows what actually ran.
+6. **Advanced → Request timeout:** raise it to the maximum (30 s). With `?async=1` the
+   response is immediate, so this only matters for the Render cold start (30–60 s) on the
+   first call after an idle period. If that one times out the run still proceeds; the
+   `Activity` page shows what actually happened.
 7. Save and use **Test run** to confirm you get `200`.
 
-Response codes: `200` ran · `409` another run already in progress (not an error) ·
-`401` bad or missing secret.
+Response codes: `202` accepted and running in the background (`async=1`) · `200` ran to
+completion (synchronous) · `409` another run already in progress (not an error) · `401`
+bad or missing secret.
 
 > Optionally add a second cronjob hitting `GET /api/status` every 10 minutes to keep the
 > instance warm, which removes most cold-start latency.
@@ -353,7 +362,7 @@ All routes are prefixed `/api`. 🔒 = requires `Authorization: Bearer <CRON_SEC
 | `GET` | `/tracked-products/:id/logs` | Scrape log with per-attempt trail |
 | `GET` | `/tracked-products/:id/alerts` | Alerts for this product |
 | `POST` | `/tracked-products/:id/scrape` | 🔒 Scrape one product now |
-| `POST` `GET` | `/cron/scrape` | 🔒 Scheduled run. `?force=1` ignores intervals |
+| `POST` `GET` | `/cron/scrape` | 🔒 Scheduled run. `?async=1` returns 202 and runs in the background (use this for cron); `?force=1` ignores intervals |
 
 Errors use one shape:
 
