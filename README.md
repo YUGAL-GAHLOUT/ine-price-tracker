@@ -4,334 +4,189 @@
 |---|---|
 | **Live site** | https://ine-price-tracker.vercel.app |
 | **API** | https://ine-price-tracker-backend-vwt5.onrender.com |
-| **Repository** | https://github.com/YUGAL-GAHLOUT/ine-price-tracker |
 
 > The API runs on Render's free tier, which sleeps after inactivity. The first request
 > after a quiet period takes 30–60 s to wake it; everything after that is immediate.
 
 Tracks the price and stock of products from INE's mock storefront
-([demo.inelabteamdev.com](https://demo.inelabteamdev.com)) on a **2-hourly schedule**,
-and records an honest history of what was observed — including the scrapes that failed.
+([demo.inelabteamdev.com](https://demo.inelabteamdev.com)) on a 2-hourly schedule, and
+records an honest history of what was observed — including the scrapes that failed.
 
-The store is deliberately hard to scrape: the price is hidden behind a mouse-movement
-gate and a WebAssembly proof-of-work, the page renders **decoy prices on the obvious
-selectors**, CSS class names and price formats rotate, and ~35% of price loads are
-slowed or dropped on purpose. The scraper is built around those realities — see
+The store is deliberately hard to scrape: the price is behind a mouse-movement gate and
+a WebAssembly proof-of-work, the page renders decoy prices on the obvious selectors,
+class names and price formats rotate, and ~35% of price loads are slowed or dropped on
+purpose. The scraper is built around those realities — see
 [`docs/design-note.md`](docs/design-note.md) for the reasoning and
-[`docs/store-analysis.md`](docs/store-analysis.md) for the full teardown.
+[`docs/store-analysis.md`](docs/store-analysis.md) for the teardown.
 
----
+## Overview
 
-## Table of contents
-
-1. [Overview](#1-overview) · 2. [Architecture](#2-architecture) · 3. [Tech stack](#3-tech-stack)
-4. [Project structure](#4-project-structure) · 5. [Local setup](#5-local-setup)
-6. [Supabase setup](#6-supabase-setup) · 7. [Database schema](#7-database-schema)
-8. [Environment variables](#8-environment-variables) · 9. [Running everything](#9-running-everything)
-10. [Headed / observable run](#10-headed--observable-run) · 11. [Manual scraping](#11-manual-scraping)
-12. [Scheduled scraping](#12-scheduled-scraping-every-2-hours) · 13. [API reference](#13-api-reference)
-14. [Testing](#14-testing) · 15. [Deployment](#15-deployment)
-16. [Reliability strategy](#16-scraping-reliability-strategy) · 17. [Known limitations](#17-known-limitations)
-
----
-
-## 1. Overview
-
-- **Search** the store's catalogue by partial or full product name (brand and SKU match too).
-- **Track** a product; it is persisted in Supabase and identified by the store's stable
-  numeric product id, never by its display name.
-- **Scrape** each tracked product's current price and stock **every 2 hours**, triggered
-  by an external cron service.
+- **Search** the catalogue by partial or full name (brand and SKU match too).
+- **Track** a product, identified by the store's stable numeric id, never by display name.
+- **Scrape** each tracked product every 2 hours, triggered by an external cron service.
 - **View** price and stock history as a chart and a table.
-- **Inspect** a per-product scrape log with every attempt and its outcome
-  (`success` / `retried` / `failed`), including a per-attempt breakdown.
+- **Inspect** a per-product scrape log with every attempt and its outcome.
 
 Core guarantee: **a failed scrape never writes price history and never overwrites the
 last known good price.** It is recorded as a failure, with a reason.
 
-## 2. Architecture
+## Architecture
 
-```
-┌──────────────┐   HTTPS    ┌───────────────────────┐   supabase-js  ┌──────────────┐
-│  React SPA   │──────────▶ │  Express API          │───────────────▶│  Supabase    │
-│  (Vercel)    │            │  (Render)             │                │  PostgreSQL  │
-└──────────────┘            │                       │                └──────────────┘
-                            │  ┌─────────────────┐  │
-┌──────────────┐  POST      │  │ Scrape service  │  │   fetch (JSON)   ┌──────────────┐
-│ cron-job.org │───────────▶│  │  · retry/backoff│  │─────────────────▶│  INE mock    │
-│  every 2h    │  + secret  │  │  · validation   │  │                  │  store       │
-└──────────────┘            │  │  · honest logs  │  │   Playwright     │              │
-                            │  └─────────────────┘  │═════════════════▶│              │
-                            └───────────────────────┘  (price & stock)  └──────────────┘
-```
+A React SPA on Vercel talks over HTTPS to an Express API on Render, which is the only
+thing that touches Supabase (via `supabase-js`) or the store. cron-job.org POSTs to the
+API every 2 hours with a shared secret; the scrape service handles retries and backoff,
+validation, honest logging and bounded concurrency.
 
 **Why two ways of talking to the store.** Catalogue metadata is plain JSON over HTTP, so
-it is fetched with `fetch`. Price and stock are not served as data at all — obtaining
-them requires executing WebAssembly, solving a proof-of-work and satisfying a
-mouse-movement gate — so those, and only those, use Playwright.
+it is fetched with `fetch`. Price and stock are not served as data at all — getting them
+requires executing WebAssembly, solving a proof-of-work and satisfying a mouse-movement
+gate — so those, and only those, use Playwright.
 
-**Why cron is external.** Render's free tier sleeps. An in-process `setInterval` would
-simply stop running. An external caller both triggers the run *and* wakes the instance.
-
-## 3. Tech stack
+**Why cron is external.** Render's free tier sleeps, so an in-process `setInterval` would
+simply stop running. An external caller both triggers the run and wakes the instance.
 
 | Layer | Choice |
 |---|---|
-| Frontend | React 18 + Vite + React Router + Recharts → **Vercel** |
-| Backend | Node 22 + Express 4 (ESM) → **Render** |
-| Database | **Supabase** (PostgreSQL) |
-| Scraping | `fetch` for catalogue JSON · **Playwright** (Chromium) for price & stock |
-| Scheduling | **cron-job.org** → `POST /api/cron/scrape`, every 2 hours |
+| Frontend | React 18 + Vite + React Router + Recharts → Vercel |
+| Backend | Node 22 + Express 4 (ESM) → Render |
+| Database | Supabase (PostgreSQL) |
+| Scraping | `fetch` for catalogue JSON · Playwright (Chromium) for price & stock |
+| Scheduling | cron-job.org → `POST /api/cron/scrape`, every 2 hours |
 | Validation | zod (API input) · hand-written parsers (scraped values) |
 | Tests | `node:test` |
 
-## 4. Project structure
+## Project structure
 
 ```
-backend/
-  src/
-    config/        env.js, store.js        # store.js pins the only scrapeable origin
-    db/            supabase.js, repositories/
-    scraper/       browser.js              # shared Chromium + the cross-check hook
-                   productScraper.js       # one attempt: navigate → gate → reveal → extract
-                   normalize.js            # price/stock parsing (pure, heavily tested)
-                   retry.js                # timeout, backoff+jitter, bounded retries
-    services/      storeClient.js          # HTTP access to the store's JSON
-                   scrapeService.js        # retries, validation, honest logging, concurrency
-                   trackingService.js
-    controllers/   routes/  middleware/  utils/
-    app.js  server.js
-  scripts/         scrape-cli.js           # headed + dry-run modes
-                   sync-catalog.js
-  tests/
-frontend/          src/pages, src/components, src/lib
-database/          schema.sql
-docs/              design-note.md, store-analysis.md
-.github/workflows/ ci.yml, scrape-smoke.yml
-render.yaml
+backend/src/
+  scraper/   browser.js (shared Chromium + cross-check hook) · productScraper.js (one
+             attempt: navigate → gate → reveal → extract) · normalize.js (price/stock
+             parsing, pure and heavily tested) · retry.js (timeout, backoff, jitter)
+  services/  storeClient.js (store JSON) · scrapeService.js (retries, validation, honest
+             logging, concurrency) · trackingService.js
+  config/ db/ controllers/ routes/ middleware/ utils/
+backend/scripts/  scrape-cli.js (headed + dry-run modes) · sync-catalog.js
+frontend/src/ pages, components, lib · database/schema.sql · docs/ · render.yaml
 ```
 
-## 5. Local setup
+## Local setup
 
-**Prerequisites:** Node ≥ 20 (22 recommended), npm, and a free Supabase project.
+Prerequisites: Node >= 20 (22 recommended), npm, and a free Supabase project.
 
 ```bash
-git clone <your-repo-url>
-cd iNE
+cd backend && npm install && cp .env.example .env    # installs Chromium too
+cd ../frontend && npm install && cp .env.example .env
 ```
 
-**Backend**
+If the Playwright download is skipped, run
+`npx playwright install chromium chromium-headless-shell` explicitly.
+
+### Supabase
+
+Create a free project, run the whole of [`database/schema.sql`](database/schema.sql) in
+the SQL Editor (it is idempotent), then from **Project Settings → API** copy the Project
+URL to `SUPABASE_URL` and the `service_role` key — the secret one, not `anon` — to
+`SUPABASE_SERVICE_ROLE_KEY`. Finally populate the catalogue mirror that powers search:
 
 ```bash
-cd backend
-npm install                 # also installs Chromium for Playwright
-cp .env.example .env        # then fill it in — see §8
+cd backend && npm run catalog:sync
 ```
 
-If the Playwright download is skipped for any reason, run it explicitly:
+That walks the store's 1000 product ids and upserts them. It takes **~15–20 minutes**,
+because the store rate-limits bursts (`429` + `Retry-After`) and the sync backs off rather
+than hammering it; it re-sweeps failed ids, exits non-zero on an incomplete catalogue, and
+is safe to re-run.
 
-```bash
-npx playwright install chromium chromium-headless-shell
-```
+**Why a mirror?** `/api/catalog` returns a *random sample* per call and caps `pageSize` at
+60, so it cannot be paged to enumerate the catalogue. Ids are dense in `1..1000`, so
+walking ids is the only reliable way to build a search index.
 
-**Frontend**
+**Security.** The service-role key bypasses Row Level Security and must stay on the
+backend. RLS is enabled on every table with no policies, so the public `anon` key — the
+only key that could ever reach a browser — can read nothing.
 
-```bash
-cd ../frontend
-npm install
-cp .env.example .env
-```
-
-## 6. Supabase setup
-
-1. Create a project at [supabase.com](https://supabase.com) (free tier).
-2. Open **SQL Editor**, paste the whole of [`database/schema.sql`](database/schema.sql),
-   and **Run**. It is idempotent, so it is safe to re-run.
-3. Go to **Project Settings → API** and copy:
-   - **Project URL** → `SUPABASE_URL`
-   - **`service_role` key** → `SUPABASE_SERVICE_ROLE_KEY` (the secret one, *not* `anon`)
-4. Populate the catalogue mirror that powers search:
-
-   ```bash
-   cd backend && npm run catalog:sync
-   ```
-
-   This walks the store's 1000 product ids and upserts them. **It takes ~15–20 minutes**,
-   because the store rate-limits bursts (`429` + `Retry-After`) and the sync backs off
-   rather than hammering it. It prints progress, re-sweeps any ids that failed, warns
-   loudly and exits non-zero if the catalogue is incomplete, and is safe to re-run.
-
-> **Why a mirror?** The store's `/api/catalog` returns a *random sample* on every call
-> and caps `pageSize` at 60, so it cannot be paged through to enumerate the catalogue.
-> Product ids are dense in `1..1000`, so walking ids is the only reliable way to build a
-> complete search index.
-
-> **Security.** The service-role key bypasses Row Level Security and must stay on the
-> backend. RLS is enabled on every table with no policies, so the public `anon` key —
-> the only key that could ever reach a browser — can read nothing.
-
-## 7. Database schema
+## Database schema
 
 Full DDL in [`database/schema.sql`](database/schema.sql).
 
 | Table | Purpose |
 |---|---|
-| `catalog_products` | Mirror of the store catalogue; powers partial-name search (trigram index) |
-| `tracked_products` | What the user chose to track, keyed by the store's `store_product_id` |
-| `scrape_runs` | One row per triggered run; doubles as the lock preventing overlapping runs |
+| `catalog_products` | Catalogue mirror; powers partial-name search (trigram index) |
+| `tracked_products` | What the user chose to track, keyed by `store_product_id` |
+| `scrape_runs` | One row per run; doubles as the lock preventing overlapping runs |
 | `price_history` | **Validated observations only** — a failed scrape writes nothing here |
 | `scrape_logs` | One row per scrape per product, with a per-attempt `attempt_trail` |
 | `alerts` | Price drop / rise, back-in-stock, out-of-stock, page-structure change |
 
-Honesty is enforced by the database, not just by application code:
+Honesty is enforced by the database, not just by application code — a failed log cannot
+carry values, a successful one cannot omit them, a failure must carry a reason, and
+`in_stock` must agree with `stock_quantity`:
 
 ```sql
--- a failed log cannot carry values; a successful one cannot omit them
 constraint success_has_values check (
   (status = 'failed'  and scraped_price is null and scraped_stock is null)
   or (status <> 'failed' and scraped_price is not null and scraped_stock is not null)
 )
-constraint failure_has_reason check (status <> 'failed' or failure_code is not null)
-constraint stock_consistent   check (in_stock = (stock_quantity > 0))
 ```
 
-## 8. Environment variables
+## Environment variables
 
-### Backend — `backend/.env`
+`backend/.env` — required: `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `CRON_SECRET`
+(`openssl rand -hex 32`; full scrape-trigger rights, server-side only).
 
-| Variable | Required | Default | Purpose |
-|---|---|---|---|
-| `SUPABASE_URL` | ✅ | — | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | ✅ | — | Service-role key. **Backend only — never expose** |
-| `CRON_SECRET` | ✅ | — | Full scrape-trigger rights (cron endpoint + CLI + curl). **Server-side only.** `openssl rand -hex 32` |
-| `MANUAL_SCRAPE_TOKEN` | | — | Low-privilege token enabling the dashboard's "Scrape now" button. May re-scrape one *already-tracked* product and nothing else; rate limited to 6 req/10 min per IP. **Must differ from `CRON_SECRET`** (the server refuses to start otherwise), because this value is bundled into the public frontend build. Unset ⇒ button hidden. `openssl rand -hex 24` |
-| `PORT` | | `8080` | HTTP port (Render sets this automatically) |
-| `NODE_ENV` | | `development` | `production` hides internal error details |
-| `CORS_ORIGINS` | | `*` | Comma-separated allowed origins; set to your Vercel URL in production |
-| `LOG_LEVEL` | | `info` | `debug` \| `info` \| `warn` \| `error` |
-| `SCRAPE_MAX_ATTEMPTS` | | `4` | Attempts per product per run, including the first |
-| `SCRAPE_ATTEMPT_TIMEOUT_MS` | | `60000` | Hard ceiling on one attempt |
-| `SCRAPE_RETRY_BASE_MS` | | `1500` | Backoff base |
-| `SCRAPE_RETRY_MAX_MS` | | `15000` | Backoff cap |
-| `SCRAPE_CONCURRENCY` | | `2` | Products scraped in parallel (each is a browser tab) |
-| `SCRAPE_RUN_LOCK_STALE_MS` | | `1200000` | A `running` run older than this is reaped |
-
-### Frontend — `frontend/.env`
-
-| Variable | Required | Purpose |
+| Optional | Default | Purpose |
 |---|---|---|
-| `VITE_API_BASE_URL` | ✅ | Backend base URL, no trailing slash |
-| `VITE_MANUAL_SCRAPE_TOKEN` | | Enables the in-app "Scrape now" button. Must equal the backend's `MANUAL_SCRAPE_TOKEN`. **Anything `VITE_`-prefixed is bundled into public JavaScript**, which is exactly why this is a separate, deliberately weak credential — it can only re-scrape a product that is already tracked. **Never put `CRON_SECRET` here.** Unset ⇒ the UI hides the button and explains why. |
+| `MANUAL_SCRAPE_TOKEN` | — | Low-privilege token enabling the dashboard's "Scrape now" button. Must differ from `CRON_SECRET` (the server refuses to start otherwise). Unset ⇒ button hidden |
+| `PORT` | `8080` | HTTP port (Render sets this) |
+| `NODE_ENV` | `development` | `production` hides internal error details |
+| `CORS_ORIGINS` | `*` | Comma-separated; set to your Vercel URL in production |
+| `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `SCRAPE_*` | see below | Tuning: `MAX_ATTEMPTS` 4, `ATTEMPT_TIMEOUT_MS` 60000, `RETRY_BASE_MS` 1500, `RETRY_MAX_MS` 15000, `CONCURRENCY` 2 (each is a browser tab), `RUN_LOCK_STALE_MS` 1200000 |
 
-Real credentials go in `.env`, which is git-ignored. Only `.env.example` is committed.
+`frontend/.env` — `VITE_API_BASE_URL` (required, no trailing slash) and optionally
+`VITE_MANUAL_SCRAPE_TOKEN`, which must equal the backend's `MANUAL_SCRAPE_TOKEN`.
+Anything `VITE_`-prefixed is bundled into public JavaScript, which is exactly why that
+is a separate, deliberately weak credential. **Never put `CRON_SECRET` there.**
 
-## 9. Running everything
+Real credentials live in `.env`, which is git-ignored; only `.env.example` is committed.
+
+## Running
 
 ```bash
-# Backend API  → http://localhost:8080
-cd backend && npm run dev
-
-# Frontend     → http://localhost:5173
-cd frontend && npm run dev
+cd backend && npm run dev        # API      → http://localhost:8080
+cd frontend && npm run dev       # frontend → http://localhost:5173
 ```
 
-Check the API is alive:
-
-```bash
-curl http://localhost:8080/api/health
-```
-
-Then open <http://localhost:5173>, go to **Add product**, search for something
-(e.g. `helix`), and click **Track**.
+Open <http://localhost:5173> → **Add product**, search `helix`, click **Track**.
 
 ### Running the scraper directly
 
 ```bash
 cd backend
-
-# Scrape every tracked product that is due, writing to Supabase
-npm run scrape:once
-
-# Ignore each product's interval and scrape all active products
-node scripts/scrape-cli.js --all
-
-# Dry run against one store product id — no database needed, nothing persisted
-node scripts/scrape-cli.js --id 88
-node scripts/scrape-cli.js --id 88 --repeat 5     # exercise retries and failures
+npm run scrape:once                            # every due tracked product → Supabase
+node scripts/scrape-cli.js --all               # ignore intervals, scrape all active
+node scripts/scrape-cli.js --id 88 --repeat 5  # dry run, no database, exercises retries
+npm run scrape:demo                            # visible Chromium, 5 passes, no database
+npm run scrape:headed                          # visible, all tracked products → Supabase
 ```
 
-## 10. Headed / observable run
-
-```bash
-cd backend
-
-# ▶ The one to use for the demo / recording.
-#   Visible Chromium, 5 passes against one product, NO database required,
-#   nothing persisted — so it works identically on any machine, every time.
-npm run scrape:demo
-
-# Visible Chromium over every active tracked product, writing to Supabase.
-# Requires backend/.env and at least one tracked product.
-npm run scrape:headed
-
-# Any product / pass count you like
-node scripts/scrape-cli.js --headed --slow --id 88 --repeat 4
-```
-
-Both open a real Chromium window with `slowMo` so each step is watchable, and log
-every step with a timestamp:
+The headed modes open a real Chromium window with `slowMo` and log every step with a
+timestamp:
 
 ```
-[18:55:24.557] ──── pass 4/8 ────
-[18:55:25.102]   attempt 1: starting
-[18:55:25.140]     · navigate
-[18:55:25.881]     · consent
 [18:55:27.030]     · hover-gate
 [18:55:30.744]     · reveal
-[18:55:30.780]     · await-quote
 [18:55:31.076]     · store-retry          ← the store reported an internal retry
 [18:55:32.784]   attempt 1: SUCCESS in 8227ms
-[18:55:32.784]   RESULT price=₹25739 stock=32 inStock=true source=layout_class crossChecked=true
+[18:55:32.784]   RESULT price=₹25739 stock=32 source=layout_class crossChecked=true
 ```
 
-**For the 2–4 minute demo recording**, `npm run scrape:demo` (5 passes) or more. The store fails or
-stalls roughly a third of price loads, so a handful of passes reliably shows a slow
-response, a failed attempt, the backoff, and a successful retry — plus a run that
-exhausts its attempts and is recorded as a failure with **nothing written to history**.
+Since the store fails or stalls roughly a third of price loads, a handful of passes
+reliably shows a slow response, a failed attempt, the backoff, a successful retry, and a
+run that exhausts its attempts and is recorded as a failure with nothing written to
+history. Production always runs headless; headed mode is a development tool.
 
-Production always runs headless; headed mode is a development and demonstration tool.
-
-## 11. Manual scraping
-
-The endpoint is never an open browser for the internet. It takes either credential:
-
-```bash
-# Full rights (also drives the cron endpoint) — server-side only
-curl -X POST http://localhost:8080/api/tracked-products/<uuid>/scrape \
-  -H "Authorization: Bearer $CRON_SECRET"
-
-# Low-privilege token — what the dashboard button uses
-curl -X POST http://localhost:8080/api/tracked-products/<uuid>/scrape \
-  -H "Authorization: Bearer $MANUAL_SCRAPE_TOKEN"
-```
-
-**Why two credentials.** Anything the browser sends must be baked into the Vite
-bundle, which is public. Shipping `CRON_SECRET` there would hand the scheduled-scrape
-endpoint to anyone who opened DevTools. So the two capabilities are split:
-`CRON_SECRET` triggers full runs and never leaves the server;
-`MANUAL_SCRAPE_TOKEN` can only re-scrape a product that is *already tracked*, is rate
-limited to 6 requests per 10 minutes per IP, and is additionally bounded by the global
-run lock (a concurrent request gets `409`, not a second browser). The server refuses to
-start if the two are set to the same value.
-
-An interactive scrape also runs on a reduced retry budget (3 attempts × 45 s) so the
-request cannot hold a spinner open for minutes; the scheduled run keeps the full,
-more patient budget. The frontend aborts after 3 minutes with a message telling you the
-scrape may still be running server-side.
-
-## 12. Scheduled scraping (every 2 hours)
-
-The backend exposes a cron endpoint instead of running an internal timer:
+## Scraping on a schedule
 
 ```
 POST /api/cron/scrape?async=1     Authorization: Bearer <CRON_SECRET>
@@ -339,220 +194,125 @@ POST /api/cron/scrape?async=1     Authorization: Bearer <CRON_SECRET>
 
 **Use `?async=1` for the scheduled caller.** A full run takes 40–90 s but cron services
 cap a request at ~30 s, so a synchronous call would be logged as a failure on *every*
-run — and cron-job.org disables a job that keeps failing, silently stopping the
-schedule. With `async=1` the endpoint returns `202 Accepted` immediately and runs the
-scrape in the background; the run is still recorded honestly in `scrape_runs` and
-`scrape_logs`, so the dashboard remains the source of truth. Omit it (or use the manual
-endpoint) when you want the full summary in the response.
+run — and cron-job.org disables a job that keeps failing, silently stopping the schedule.
+With `async=1` the endpoint returns `202` immediately and runs in the background; the run
+is still recorded in `scrape_runs` and `scrape_logs`, so the dashboard stays the source of
+truth. Other responses: `200` ran to completion (synchronous), `409` another run already in
+progress (not an error), `401` bad secret.
 
-It reaps stale runs, takes the run lock, loads every active product whose interval has
-elapsed (with a 10-minute grace window — `last_scraped_at` is stamped when a scrape
-*finishes*, so a strict comparison would make the 08:00 run miss a product last scraped
-at 06:00:45 and quietly turn a 2-hourly schedule into a 4-hourly one), scrapes them with bounded concurrency, writes history for the successes and a
-log for every attempt, and returns a summary. A single product failing never aborts the
-run.
+The run reaps stale runs, takes the run lock, loads every active product whose interval has
+elapsed (with a 10-minute grace window, since `last_scraped_at` is stamped when a scrape
+*finishes* — a strict comparison turns a 2-hourly schedule into a 4-hourly one), scrapes
+with bounded concurrency, and writes history for the successes and a log for every attempt.
+One product failing never aborts the run.
 
-### Configuring cron-job.org
+On cron-job.org: `POST` every 2 hours to `.../api/cron/scrape?async=1` with header
+`Authorization: Bearer <CRON_SECRET>`, request timeout raised to 30 s for the Render cold
+start. A second job hitting `GET /api/status` every 10 minutes keeps the instance warm.
 
-1. Sign in at [cron-job.org](https://cron-job.org) → **Create cronjob**.
-2. **URL:** `https://<your-render-service>.onrender.com/api/cron/scrape?async=1`
-3. **Schedule:** *Every 2 hours* — or custom: minutes `0`, hours
-   `0,2,4,6,8,10,12,14,16,18,20,22`.
-4. **Request method:** `POST`
-5. **Headers:** `Authorization: Bearer <your CRON_SECRET>`
-6. **Advanced → Request timeout:** raise it to the maximum (30 s). With `?async=1` the
-   response is immediate, so this only matters for the Render cold start (30–60 s) on the
-   first call after an idle period. If that one times out the run still proceeds; the
-   `Activity` page shows what actually happened.
-7. Save and use **Test run** to confirm you get `200`.
+### Manual scraping
 
-Response codes: `202` accepted and running in the background (`async=1`) · `200` ran to
-completion (synchronous) · `409` another run already in progress (not an error) · `401`
-bad or missing secret.
+**Why two credentials.** Anything the browser sends is baked into the public Vite bundle,
+so shipping `CRON_SECRET` there would hand the scheduled-scrape endpoint to anyone who
+opened DevTools. `CRON_SECRET` triggers full runs and never leaves the server;
+`MANUAL_SCRAPE_TOKEN` can only re-scrape an *already-tracked* product, is rate limited to 6
+requests per 10 minutes per IP, and is bounded by the global run lock (a concurrent request
+gets `409`, not a second browser). An interactive scrape also runs on a reduced budget
+(3 attempts × 45 s) so it cannot hold a spinner open for minutes.
 
-> Optionally add a second cronjob hitting `GET /api/status` every 10 minutes to keep the
-> instance warm, which removes most cold-start latency.
+## API reference
 
-## 13. API reference
-
-All routes are prefixed `/api`. 🔒 = requires `Authorization: Bearer <CRON_SECRET>`.
-🔑 = accepts `CRON_SECRET` **or** the low-privilege `MANUAL_SCRAPE_TOKEN` ([§11](#11-manual-scraping)).
+All routes are prefixed `/api`. **[C]** requires `CRON_SECRET`; **[M]** accepts
+`CRON_SECRET` or the low-privilege `MANUAL_SCRAPE_TOKEN`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness |
-| `GET` | `/status` | Recent runs, recent logs, recent alerts |
-| `GET` | `/products/search?q=&limit=` | Search the store catalogue (partial or full name, brand, SKU) |
-| `GET` | `/tracked-products` | Dashboard list, each with latest price and latest scrape status |
-| `POST` | `/tracked-products` | Track a product — `{ storeProductId, scrapeIntervalMinutes? }` |
-| `GET` | `/tracked-products/:id` | One tracked product |
-| `PATCH` | `/tracked-products/:id` | `{ isActive?, scrapeIntervalMinutes? }` |
-| `DELETE` | `/tracked-products/:id` | Stop tracking |
+| `GET` | `/health` · `/status` | Liveness · recent runs, logs and alerts |
+| `GET` | `/products/search?q=&limit=` | Search the catalogue (partial name, brand, SKU) |
+| `GET` | `/tracked-products` | Dashboard list with latest price and scrape status |
+| `POST` | `/tracked-products` | Track — `{ storeProductId, scrapeIntervalMinutes? }` |
+| `GET` `PATCH` `DELETE` | `/tracked-products/:id` | Read · `{ isActive?, scrapeIntervalMinutes? }` · stop tracking |
 | `GET` | `/tracked-products/:id/history` | Price + stock history, oldest first (chart-ready) |
-| `GET` | `/tracked-products/:id/logs` | Scrape log with per-attempt trail |
-| `GET` | `/tracked-products/:id/alerts` | Alerts for this product |
-| `POST` | `/tracked-products/:id/scrape` | 🔑 Scrape one already-tracked product now (rate limited; reduced retry budget) |
-| `POST` `GET` | `/cron/scrape` | 🔒 Scheduled run. `?async=1` returns 202 and runs in the background (use this for cron); `?force=1` ignores intervals |
+| `GET` | `/tracked-products/:id/logs` · `/alerts` | Scrape log with per-attempt trail · alerts |
+| `POST` | `/tracked-products/:id/scrape` | **[M]** Scrape one tracked product now (rate limited) |
+| `POST` `GET` | `/cron/scrape` | **[C]** Scheduled run. `?async=1` returns 202; `?force=1` ignores intervals |
 
 Errors use one shape:
+`{ "error": { "code": "not_found", "message": "Tracked product … not found" } }`
 
-```json
-{ "error": { "code": "not_found", "message": "Tracked product … not found" } }
-```
-
-## 14. Testing
+## Testing
 
 ```bash
 cd backend && npm test
 ```
 
-44 unit tests covering the parts where a bug would corrupt data silently:
+44 unit tests, concentrated where a bug would corrupt data silently: all seven price
+formats the store rotates through (spaced, European, full-width Unicode, NBSP,
+split-carrier with zero-width spaces…), lakh grouping and genuine paise, plus rejection of
+empty, non-numeric, zero and absurd values; the five in-stock phrasings and the critical
+case that a **missing or unrecognised badge is a failure, not "out of stock"**; retry
+recovery, bounded give-up, `PermanentError` short-circuit, backoff growth, cap and genuine
+jitter, and that every attempt is reported so a log can show failures preceding a success;
+`Retry-After` honoured over our own backoff, with 429 as its own type so it is never
+mistaken for "product not found"; `withTimeout` rejecting a promise that never settles; and
+a target guard so only `demo.inelabteamdev.com` URLs can be produced.
 
-- **`parsePrice`** — all seven formats the store rotates through (default, spaced,
-  European, trailing-text, full-width Unicode, NBSP, split-carrier with zero-width
-  spaces), Indian lakh grouping, genuine paise — and rejection of empty, non-numeric,
-  zero and absurd values rather than guessing.
-- **`parseStock`** — all five in-stock phrasings, genuine out-of-stock, and the critical
-  case that a **missing or unrecognised badge is a failure, not "out of stock"**.
-- **`retry`** — success, recovery after transient failures, bounded give-up,
-  `PermanentError` short-circuit, and that **every attempt is reported** so the log can
-  show failures that preceded a success.
-- **`backoffDelay`** — exponential growth, cap respected, genuine jitter.
-- **Rate limiting** — `Retry-After` is honoured over our own backoff, and a 429 surfaces
-  as its own type so it can never be mistaken for "product not found".
-- **`withTimeout`** — rejects when a promise never settles (the store's worst fault).
-- **Target guard** — only `demo.inelabteamdev.com` URLs can ever be produced; ids that
-  are not positive integers are rejected, so no caller can redirect the scraper.
-
-**Integration testing against the live store** (this is the one that matters):
+Integration testing against the live store is the one that matters:
 
 ```bash
 node scripts/scrape-cli.js --id 88 --repeat 12
 ```
 
-Most recent measured result: **26/26 passes produced a validated observation** across
-runs of 8, 6 and 12, with 14 individual attempts failing and being recovered by retry.
+Most recent measured result: **26/26 passes produced a validated observation** across runs
+of 8, 6 and 12, with 14 individual attempts failing and recovered by retry. CI runs the
+unit tests and a production frontend build on every push; a scheduled workflow smoke-tests
+the scraper against the live store daily.
 
-CI (GitHub Actions) runs the unit tests and a production frontend build on every push;
-a separate scheduled workflow smoke-tests the scraper against the live store daily.
+## Deployment
 
-## 15. Deployment
+**Backend → Render, on the Docker runtime, not the native Node runtime.** Chromium needs
+system libraries that `playwright install --with-deps` installs via `apt-get`, and Render's
+build step runs without root, so that fails with `su: Authentication failure`.
+[`backend/Dockerfile`](backend/Dockerfile) is based on Playwright's official image, which
+already has them. Use the committed [`render.yaml`](render.yaml) blueprint, or a Web Service
+with Dockerfile path `./backend/Dockerfile`, build context `./backend`, health check
+`/api/health`. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`,
+`NODE_ENV=production`, `CORS_ORIGINS=https://<your-app>.vercel.app`; on the free instance
+(0.1 CPU / 512 MB) also `SCRAPE_CONCURRENCY=1` and `SCRAPE_ATTEMPT_TIMEOUT_MS=90000`, since
+Chromium is several times slower there. Then seed the catalogue once with
+`npm run catalog:sync`.
 
-### Backend → Render
-
-Use the **Docker** runtime, not Render's native Node runtime.
-
-Chromium needs system libraries (`libnss3`, `libatk`, `libgbm`, fonts…) that
-`playwright install --with-deps` installs via `apt-get`. Render's build step runs
-without root, so that command fails with `su: Authentication failure` →
-`Failed to install browsers`. [`backend/Dockerfile`](backend/Dockerfile) is based on
-Playwright's official image, which already contains them.
-
-Either use the committed [`render.yaml`](render.yaml) blueprint (**New → Blueprint**), or
-configure a Web Service manually:
-
-| Setting | Value |
-|---|---|
-| Language / Runtime | **Docker** |
-| Dockerfile path | `./backend/Dockerfile` |
-| Docker build context | `./backend` |
-| Health check path | `/api/health` |
-
-On the free instance (0.1 CPU / 512 MB) also set `SCRAPE_CONCURRENCY=1` and
-`SCRAPE_ATTEMPT_TIMEOUT_MS=90000` — one browser at a time, and a longer per-attempt
-budget, since Chromium is several times slower there than on a laptop.
-
-Environment variables to set in the dashboard: `SUPABASE_URL`,
-`SUPABASE_SERVICE_ROLE_KEY`, `CRON_SECRET`, `NODE_ENV=production`,
-`CORS_ORIGINS=https://<your-vercel-app>.vercel.app`.
-
-After the first deploy, seed the catalogue once from the Render shell
-(or locally against the same Supabase project):
-
-```bash
-npm run catalog:sync
-```
-
-> Chromium on a 512 MB / 0.1 CPU free instance is tight. `SCRAPE_CONCURRENCY=1` is chosen
-> for that; raise it only on a paid plan.
-
-### Frontend → Vercel
-
-| Setting | Value |
-|---|---|
-| Root directory | `frontend` |
-| Framework | Vite |
-| Build command | `npm run build` |
-| Output directory | `dist` |
-
-Set `VITE_API_BASE_URL` to your Render URL. Set `VITE_MANUAL_SCRAPE_TOKEN` to the same
-value as the backend's `MANUAL_SCRAPE_TOKEN` if you want the in-app **Scrape now**
-button; **never** put `CRON_SECRET` here — see [§11](#11-manual-scraping).
+**Frontend → Vercel:** root directory `frontend`, framework Vite, build `npm run build`,
+output `dist`, `VITE_API_BASE_URL` set to the Render URL.
 [`frontend/vercel.json`](frontend/vercel.json) adds the SPA rewrite so deep links work.
+Vercel bakes env vars in at *build* time, so redeploy after changing one.
 
-> Vercel bakes env vars in at **build** time, so after changing one you must
-> **redeploy** for it to take effect.
+Post-deploy, `/api/health` should return `{"status":"ok"}`,
+`/api/products/search?q=helix` should return matches, `POST /api/cron/scrape` with the
+secret should return a run summary and without it `401`. Then load the Vercel URL and
+confirm the dashboard populates, which also confirms CORS.
 
-### Cron → cron-job.org
+## Reliability strategy
 
-See [§12](#12-scheduled-scraping-every-2-hours).
+Set out in full in [`docs/design-note.md`](docs/design-note.md). The load-bearing points:
+HTTP for catalogue JSON and a browser only for price and stock; the real price element is
+found via the class published at `/api/layout`, never the decoy selectors; a value that is
+not fully understood returns `null` and fails the scrape instead of being guessed; the
+parsed value is cross-checked against the figure the page computed, and disagreement fails
+the scrape rather than recording either; every wait is bounded, and extends while the store
+reports internal retries but fails fast when it is silently stuck; 4 attempts with
+exponential backoff and full jitter, typed failure codes, no infinite loops; a failure
+writes a log row with a reason and no history row, so the last known good price is never
+overwritten.
 
-### Post-deploy checklist
-
-```bash
-curl https://<render>.onrender.com/api/health                      # → {"status":"ok"}
-curl "https://<render>.onrender.com/api/products/search?q=helix"    # → matches
-curl -X POST https://<render>.onrender.com/api/cron/scrape \
-     -H "Authorization: Bearer $CRON_SECRET"                        # → run summary
-curl -X POST https://<render>.onrender.com/api/cron/scrape          # → 401 (secret works)
-curl -X POST https://<render>.onrender.com/api/cron/scrape \
-     -H "Authorization: Bearer $MANUAL_SCRAPE_TOKEN"                # → 401 (privilege split works)
-```
-
-Then load the Vercel URL and confirm the dashboard populates (CORS is correct).
-
-## 16. Scraping reliability strategy
-
-Summarised here; the reasoning is in [`docs/design-note.md`](docs/design-note.md).
-
-1. **Right tool per job.** HTTP for catalogue JSON; a browser only for price and stock,
-   which genuinely require executing WASM and a proof-of-work.
-2. **Obey rate limits, and never mistake one for "not found".** The store answers bursts
-   with `429` + `Retry-After`; that has its own error type, the server's delay is
-   honoured, and failed ids are re-swept rather than silently dropped. During a browser
-   scrape the store renders the 429 into the page instead, so that text is detected too
-   and backed off for 30 s, and products in a run are spaced ~5 s apart.
-3. **Never trust the obvious selector.** The store renders two *hidden decoy prices* on
-   `.price-value` and `[data-price]`. The real element is located via the class the store
-   publishes at `/api/layout`, with a structural fallback that raises a
-   `structure_change` alert when used.
-4. **Parse defensively.** Seven rotating price formats and five stock phrasings are
-   normalised; anything not fully understood returns `null` and fails the scrape rather
-   than guessing.
-5. **Cross-check.** The parsed DOM value is compared against the figure the page itself
-   computed. Disagreement fails the scrape (`quote_mismatch`) instead of recording either.
-6. **Bound everything.** Per-attempt timeouts, because the store sometimes drops a
-   callback and the page hangs forever.
-7. **Retry deliberately.** 4 attempts, exponential backoff with full jitter, typed
-   failure codes, `PermanentError` short-circuit — never an infinite loop.
-8. **Distinguish slow from dead.** The wait extends while the store reports internal
-   retries and fails fast when it is silently stuck, because only a reload fixes the latter.
-9. **Fail honestly.** Failures write a log row with a reason and **no** history row. The
-   last known good price is never overwritten. Database `CHECK` constraints make a
-   dishonest log physically impossible.
-10. **Survive the schedule.** External cron (free tiers sleep), a database-level run lock
-   against duplicate invocations, stale-run reaping, capped concurrency, and per-product
-   isolation so one failure never aborts a run.
-
-## 17. Known limitations
+## Known limitations
 
 - The cross-check depends on a store internal; if it changes, observations degrade to
   `cross_checked = false` rather than failing.
-- The catalogue mirror goes stale — re-run `npm run catalog:sync` if inventory changes
-  (~15–20 min, since the store rate-limits and the sync backs off politely).
+- The catalogue mirror goes stale — re-run `npm run catalog:sync` if inventory changes.
 - Render free-tier cold starts add 30–60 s to the first cron call after an idle period.
 - Concurrency of 2 means the run lengthens with many tracked products; beyond ~20 the
   2-hour cadence would need a larger instance.
-- Alerts are in-app only; SendGrid email was not implemented.
-- No user authentication. Read endpoints are open for evaluation; everything that
-  triggers a scrape requires the shared secret.
+- Alerts are in-app only; email delivery was not implemented.
+- No user authentication. Read endpoints are open for evaluation; everything that triggers
+  a scrape requires the shared secret.
