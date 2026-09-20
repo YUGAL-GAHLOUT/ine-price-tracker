@@ -102,6 +102,6 @@ const INTERACTIVE_BUDGET = { maxAttempts: 3, attemptTimeoutMs: 45_000 };
 
 export const scrapeNow = asyncHandler(async (req, res) => {
   const product = await trackingService.getTrackedOrThrow(req.params.id);
-  const summary = await runScrape({ trigger: 'manual', products: [product], budget: INTERACTIVE_BUDGET });
+  const summary = await runScrape({ trigger: 'manual', source: 'dashboard', products: [product], budget: INTERACTIVE_BUDGET });
   res.status(summary.skipped ? 409 : 200).json(summary);
 });

@@ -92,7 +92,7 @@ export async function scrapeOneProduct(browser, product, { runId = null, headed 
       scraped_stock: null,
       attempt_trail: trail,
     });
-    await trackedRepo.markScraped(product.id, { success: false });
+    await stampScraped(product, { success: false });
     logger.error('scrape.failed', { product: product.store_product_id, code: err?.code, attempts });
     return { ok: false, product, failureCode: err?.code ?? FailureCode.UNKNOWN, error: result.error?.message, attempts };
   }
@@ -131,11 +131,35 @@ export async function scrapeOneProduct(browser, product, { runId = null, headed 
     attempt_trail: trail,
   });
 
-  await trackedRepo.markScraped(product.id, { success: true });
+  await stampScraped(product, { success: true });
   await raiseAlerts(product, previous, obs).catch((e) => logger.warn('alerts.failed', { error: e.message }));
 
   logger.info('scrape.success', { product: product.store_product_id, price: obs.price, stock: obs.stockQuantity, attempts });
   return { ok: true, product, observation: obs, history, attempts };
+}
+
+/**
+ * Stamp the product's attempt time without letting a stamp failure rewrite the
+ * outcome of a scrape that actually worked.
+ *
+ * `markScraped` retries and then throws, which is what we want — but a throw here
+ * would be caught by the run's per-product guard and recorded as a failed scrape,
+ * which is a lie: the price was fetched, validated and written to price_history.
+ * So the scrape's verdict stands and the stamp failure is raised as its own loud
+ * event, because the consequence is real and specific: the product stays due and
+ * the next trigger will scrape it again within minutes.
+ */
+async function stampScraped(product, { success }) {
+  try {
+    await trackedRepo.markScraped(product.id, { success });
+  } catch (error) {
+    logger.error('scrape.stamp.failed', {
+      product: product.store_product_id,
+      success,
+      error: error.message,
+      consequence: 'product stays due; expect a duplicate run on the next trigger',
+    });
+  }
 }
 
 /** Bonus: price-drop / back-in-stock / structure-change notices. */
@@ -192,10 +216,10 @@ async function raiseAlerts(product, previous, obs) {
  * now"), where somebody is watching a spinner and an HTTP request is being held
  * open. Scheduled runs pass nothing and keep the full, more patient budget.
  */
-export async function runScrape({ trigger = 'manual', products, headed = false, slowMo = 0, onStep, budget } = {}) {
+export async function runScrape({ trigger = 'manual', source, products, headed = false, slowMo = 0, onStep, budget } = {}) {
   await runsRepo.reapStale(config.scraper.runLockStaleMs);
 
-  const { conflict, run } = await runsRepo.start(trigger);
+  const { conflict, run } = await runsRepo.start(trigger, { source: source ?? trigger });
   if (conflict) {
     logger.warn('scrape.run.conflict', { trigger });
     return { skipped: true, reason: 'a scrape run is already in progress', results: [] };
