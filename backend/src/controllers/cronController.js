@@ -39,7 +39,7 @@ export const runScheduledScrape = asyncHandler(async (req, res) => {
     // failing gets disabled.
     res.status(202).json({ accepted: true, mode: 'async' });
 
-    startBackgroundScrape({ force, reason: 'cron' });
+    startBackgroundScrape({ force, reason: force ? 'cron-forced' : 'cron' });
     return;
   }
 
@@ -49,7 +49,7 @@ export const runScheduledScrape = asyncHandler(async (req, res) => {
   }
 
   logger.info('cron.run.start', { products: products.length, force, background: false });
-  const summary = await runScrape({ trigger: 'cron', products });
+  const summary = await runScrape({ trigger: 'cron', source: force ? 'cron-sync-forced' : 'cron-sync', products });
   logger.info('cron.run.end', { total: summary.total, succeeded: summary.succeeded, failed: summary.failed });
 
   // 409 tells the caller this invocation did nothing because another run held the
@@ -84,7 +84,7 @@ export async function startBackgroundScrape({ force = false, reason = 'cron' } =
       return;
     }
     logger.info('cron.run.start', { products: products.length, force, source: reason });
-    const summary = await runScrape({ trigger: 'cron', products });
+    const summary = await runScrape({ trigger: 'cron', source: reason, products });
     logger.info('cron.run.end', {
       source: reason,
       skipped: summary.skipped ?? false,

@@ -1,4 +1,5 @@
 import { db, unwrap } from '../supabase.js';
+import { sleep } from '../../scraper/retry.js';
 
 const COLUMNS = '*';
 
@@ -74,9 +75,31 @@ export async function remove(id) {
   unwrap(await db.from('tracked_products').delete().eq('id', id), 'delete tracked');
 }
 
-/** Record that an attempt happened, whether or not it produced data. */
-export async function markScraped(id, { success }) {
+/**
+ * Record that an attempt happened, whether or not it produced data.
+ *
+ * This is the write that keeps the schedule honest, so it does not get to fail
+ * quietly. `listDue` reads `last_scraped_at` to decide what is due; a lost stamp
+ * leaves the product due, and the next trigger scrapes it again minutes after
+ * the last run — a duplicate that looks, in `scrape_runs`, like a perfectly
+ * clean second run. It is worth two extra tries and a thrown error to avoid.
+ *
+ * supabase-js reports a failed write in the RESULT, not as a rejection, so the
+ * `unwrap` here is what turns a silent no-op into something the caller sees.
+ */
+export async function markScraped(id, { success, attempts = 3 }) {
   const patch = { last_scraped_at: new Date().toISOString() };
   if (success) patch.last_success_at = patch.last_scraped_at;
-  await db.from('tracked_products').update(patch).eq('id', id);
+
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      unwrap(await db.from('tracked_products').update(patch).eq('id', id), 'mark scraped');
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < attempts) await sleep(250 * attempt);
+    }
+  }
+  throw lastError;
 }
