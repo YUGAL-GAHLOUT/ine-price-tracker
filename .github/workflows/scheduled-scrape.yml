@@ -1,0 +1,51 @@
+# Second, independent trigger for the 2-hourly scrape.
+#
+# cron-job.org remains the primary. This exists because a hosted cron service
+# marks a slow cold start (or an edge error page returned while the instance is
+# not yet routable) as a failed job, and disables a job that keeps failing —
+# which stops the schedule entirely rather than costing one slot. GitHub's
+# scheduler has no response-size cap, no 30s request cap, and does not disable
+# itself on failure, so the two together fail independently.
+#
+# Runs on the odd hours, halfway between cron-job.org's even-hour runs: a slot
+# the primary missed is picked up an hour later instead of two. Products whose
+# interval has not elapsed are skipped server-side, so an extra call is a no-op.
+name: Scheduled scrape
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '5 1-23/2 * * *'
+
+concurrency:
+  group: scheduled-scrape
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wake the instance
+        # A free Render instance is spun down; the first request has to boot the
+        # container. Unlike a cron service we can simply wait for it.
+        run: |
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 \
+              https://ine-price-tracker-backend-vwt5.onrender.com/api/health || true)
+            echo "health attempt $i -> $code"
+            [ "$code" = "200" ] && exit 0
+            sleep 15
+          done
+          echo "instance did not come up"; exit 1
+
+      - name: Trigger scrape
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          code=$(curl -s -o /tmp/body -w '%{http_code}' --max-time 60 \
+            -X POST -H "Authorization: Bearer $CRON_SECRET" \
+            'https://ine-price-tracker-backend-vwt5.onrender.com/api/cron/scrape?async=1')
+          echo "status=$code body=$(cat /tmp/body)"
+          # 409 means another run already holds the lock, which is the correct
+          # outcome when the primary trigger got there first — not a failure.
+          case "$code" in 200|202|409) exit 0 ;; *) exit 1 ;; esac

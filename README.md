@@ -194,10 +194,16 @@ POST /api/cron/scrape?async=1     Authorization: Bearer <CRON_SECRET>
 **Use `?async=1` for the scheduled caller.** A full run takes 40–90 s but cron services
 cap a request at ~30 s, so a synchronous call would be logged as a failure on *every*
 run — and cron-job.org disables a job that keeps failing, silently stopping the schedule.
-With `async=1` the endpoint returns `202` immediately and runs in the background; the run
-is still recorded in `scrape_runs` and `scrape_logs`, so the dashboard stays the source of
-truth. Other responses: `200` ran to completion (synchronous), `409` another run already in
-progress (not an error), `401` bad secret.
+With `async=1` the endpoint answers `202 {"accepted":true,"mode":"async"}` — **32 bytes, a
+fixed string** — before it touches the database, then runs the scrape in the background.
+The run is recorded in `scrape_runs` and `scrape_logs`, so the dashboard stays the source of
+truth. Other responses: `200` ran to completion (synchronous, ≤ 100 bytes), `409` another
+run already in progress (not an error), `401` bad secret.
+
+The response never carries per-product results. A cron service aborts a response that
+exceeds its cap and records the job as *failed (output too large)*, and enough failures
+disable the job — so a response whose size grows with the number of tracked products is a
+schedule that breaks once the dataset gets big enough.
 
 The run reaps stale runs, takes the run lock, loads every active product whose interval has
 elapsed (with a 10-minute grace window, since `last_scraped_at` is stamped when a scrape
@@ -205,19 +211,45 @@ elapsed (with a 10-minute grace window, since `last_scraped_at` is stamped when 
 with bounded concurrency, and writes history for the successes and a log for every attempt.
 One product failing never aborts the run.
 
+#### Why the schedule does not depend on one cron service
+
+On the free tier the instance is asleep when the trigger arrives, so the trigger has to
+wake it — and the wake takes most of the caller's 30 s budget. Three things then go wrong
+in a way the app cannot see: the wake overruns the request timeout; the edge answers with
+an HTML error page while no instance is routable (this is the ~1 s *"output too large"* a
+cron service reports, since its cap is far below the size of that page); or the free tier's
+750 monthly instance-hours run out and the service is suspended, which looks identical.
+Each is recorded by cron-job.org as a failed job, and a job that keeps failing is
+**disabled** — which is why a bad slot costs fourteen hours rather than two.
+
+Three independent mechanisms, so no single one stopping halts the schedule:
+
+1. **cron-job.org** (primary) — the 2-hourly trigger, below.
+2. **Boot catch-up** (`backend/src/server.js`) — on process start, anything overdue is
+   scraped. The trigger that timed out at the HTTP level still *woke the instance*, so the
+   work happens regardless of whether the response got back in time. Once per process, only
+   for products whose interval has actually elapsed, and behind the same run lock — so a
+   deploy right after a good run does nothing. Set `DISABLE_BOOT_CATCHUP=1` to turn it off.
+3. **GitHub Actions** (`.github/workflows/scheduled-scrape.yml`) — the same trigger on the
+   odd hours, halfway between cron-job.org's. It can wait out a cold start (no 30 s cap, no
+   response cap) and does not disable itself on failure. Needs a `CRON_SECRET` repository
+   secret. A slot the primary missed is picked up an hour later, and calls for products that
+   are not due are no-ops server-side.
+
 On cron-job.org, two jobs, both in the **same timezone** (UTC) so their offsets line up:
 
 - **Scrape** — `POST` to `.../api/cron/scrape?async=1` on `0 */2 * * *`, header
   `Authorization: Bearer <CRON_SECRET>`, request timeout 30 s, and **2 retries 60-120 s
   apart**. Mark `409` as a success alongside `2xx`: a retry landing while the first
   attempt's background run still holds the lock gets `409`, which is correct behaviour and
-  not a failure. The retries cover deploy windows and cold starts, both of which fail in
-  under a second at Render's edge and would otherwise cost a whole 2-hour cycle.
+  not a failure.
 - **Keep warm** — `GET /api/health` on `50,55 1-23/2 * * *`, i.e. 5 and 10 minutes before
-  each scrape, so the trigger at `:00` always lands on a live instance.
+  each scrape, so the trigger at `:00` lands on an instance that is already awake. This is
+  an optimisation, not a dependency: with the boot catch-up in place, a scrape still happens
+  if it is missing.
 
 Use `/api/health` (35 bytes), **not** `/api/status` — the latter returns recent runs, logs
-and alerts (~26 KB), which exceeds cron-job.org's response cap. That fails the job every
+and alerts (~40 KB), which exceeds cron-job.org's response cap. That fails the job every
 run, and a job that keeps failing gets disabled — leaving the instance cold, so the next
 scheduled scrape hits a spun-down service and returns Render's HTML error page instead.
 
@@ -228,6 +260,17 @@ out suspends the service — which looks like exactly the same HTML error page. 
 ping is also marginal on its own terms, since Render sleeps after ~15 minutes idle and
 cron-job.org fires with up to a minute of jitter, so two pings can fall more than 15 minutes
 apart. Two pings just before the scrape are both cheaper and more reliable.
+
+#### Diagnosing a failed scheduled run
+
+```bash
+cd backend && node scripts/test-cron-production.js
+```
+
+Reproduces the cron service's exact request and reports status, duration, content type,
+**body size** and whether the body is JSON. A non-JSON body means the platform edge answered
+and the request never reached Node — check Render first, not the cron configuration. The
+secret is read from `CRON_SECRET` and never printed.
 
 ### Manual scraping
 

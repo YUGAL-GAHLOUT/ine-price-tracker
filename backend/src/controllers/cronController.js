@@ -26,36 +26,76 @@ import { logger } from '../utils/logger.js';
 export const runScheduledScrape = asyncHandler(async (req, res) => {
   const force = req.query.force === '1' || req.query.force === 'true';
   const background = req.query.async === '1' || req.query.async === 'true';
-  const products = await trackedRepo.listDue({ ignoreInterval: force });
-
-  if (!products.length) {
-    return res.json({ skipped: true, reason: 'no tracked products are due', total: 0, succeeded: 0, failed: 0, results: [] });
-  }
-
-  logger.info('cron.run.start', { products: products.length, force, background });
 
   if (background) {
-    // Detached on purpose. Failures inside are logged per product and recorded on
-    // the run row, so nothing is swallowed just because no one is awaiting it.
-    runScrape({ trigger: 'cron', products })
-      .then((summary) => logger.info('cron.run.end', { ...summary, results: undefined }))
-      .catch((error) => logger.error('cron.run.crashed', { error: error.message }));
+    // Answer BEFORE touching Supabase. On a cold start the wake itself already
+    // eats most of the caller's ~30s request budget, and a DB round trip added
+    // on top of it is what turns a slow wake into a reported failure. Nothing
+    // here depends on the answer, so there is no reason to wait for it.
+    //
+    // The body is a fixed string: its size cannot vary with how many products
+    // are tracked or what the run finds. Cron services abort a response that
+    // exceeds their cap and record the job as failed, and a job that keeps
+    // failing gets disabled.
+    res.status(202).json({ accepted: true, mode: 'async' });
 
-    return res.status(202).json({
-      accepted: true,
-      mode: 'async',
-      products: products.length,
-      message: 'Scrape started. Track progress at GET /api/status or in the dashboard Activity page.',
-    });
+    startBackgroundScrape({ force, reason: 'cron' });
+    return;
   }
 
+  const products = await trackedRepo.listDue({ ignoreInterval: force });
+  if (!products.length) {
+    return res.json({ ok: true, skipped: true, total: 0, succeeded: 0, failed: 0 });
+  }
+
+  logger.info('cron.run.start', { products: products.length, force, background: false });
   const summary = await runScrape({ trigger: 'cron', products });
-  logger.info('cron.run.end', { ...summary, results: undefined });
+  logger.info('cron.run.end', { total: summary.total, succeeded: summary.succeeded, failed: summary.failed });
 
   // 409 tells the caller this invocation did nothing because another run held the
   // lock, which is distinguishable from a real failure in its history view.
-  res.status(summary.skipped ? 409 : 200).json(summary);
+  if (summary.skipped) return res.status(409).json({ ok: false, skipped: true, reason: 'run in progress' });
+
+  // Small on purpose: the per-product detail lives in scrape_runs, scrape_logs
+  // and price_history, which is what the dashboard reads. Echoing it here only
+  // risks the response being aborted by the caller.
+  res.json({
+    ok: summary.failed === 0,
+    total: summary.total,
+    succeeded: summary.succeeded,
+    failed: summary.failed,
+  });
 });
+
+/**
+ * Run a scheduled scrape detached from any HTTP request.
+ *
+ * Detached work is not a durable queue, and this does not pretend to be one: the
+ * run takes a row in `scrape_runs` before it starts, so a process that dies
+ * mid-run leaves a `running` row that `reapStale` (or the SIGTERM handler)
+ * settles honestly rather than a silent gap. What makes it safe to detach is
+ * that nothing depends on the HTTP response — the database is the record.
+ */
+export async function startBackgroundScrape({ force = false, reason = 'cron' } = {}) {
+  try {
+    const products = await trackedRepo.listDue({ ignoreInterval: force });
+    if (!products.length) {
+      logger.info('cron.run.skipped', { reason: 'nothing due', source: reason });
+      return;
+    }
+    logger.info('cron.run.start', { products: products.length, force, source: reason });
+    const summary = await runScrape({ trigger: 'cron', products });
+    logger.info('cron.run.end', {
+      source: reason,
+      skipped: summary.skipped ?? false,
+      total: summary.total,
+      succeeded: summary.succeeded,
+      failed: summary.failed,
+    });
+  } catch (error) {
+    logger.error('cron.run.crashed', { source: reason, error: error.message });
+  }
+}
 
 /** Cheap endpoint for a keep-warm ping and for the dashboard's health badge. */
 export const status = asyncHandler(async (_req, res) => {
