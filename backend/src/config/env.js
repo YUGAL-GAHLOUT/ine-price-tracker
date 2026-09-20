@@ -44,8 +44,27 @@ export const config = {
     retryMaxMs: int('SCRAPE_RETRY_MAX_MS', 15_000),
     /** How many products are scraped in parallel. Keep small: each is a browser tab. */
     concurrency: int('SCRAPE_CONCURRENCY', 2),
-    /** A run older than this is assumed dead and no longer blocks a new run. */
-    runLockStaleMs: int('SCRAPE_RUN_LOCK_STALE_MS', 20 * 60_000),
+    /**
+     * Hard ceiling on a whole run. Products not reached by the deadline are left
+     * due and picked up next cycle, which is better than a run that outlives the
+     * window in which anything is watching it.
+     *
+     * This exists to make `runLockStaleMs` safe to shorten: the reaper frees a
+     * lock purely on age, so the threshold has to sit above the longest run that
+     * could still be alive. Unbounded, that is attempts x timeout x products
+     * (~45 min for seven products) and the threshold would have to be longer than
+     * a scrape cycle. Bounded at 12 minutes, the reaper can run at 15.
+     */
+    runDeadlineMs: int('SCRAPE_RUN_DEADLINE_MS', 12 * 60_000),
+    /**
+     * A run older than this is assumed dead and no longer blocks a new run.
+     *
+     * A deploy or a free-tier restart that lands mid-run leaves a `running` row
+     * behind: the SIGTERM handler tries to release it, but the platform does not
+     * promise the process enough time, and an unreleased lock blocks every scrape
+     * until it is reaped. At 20 minutes that reliably swallowed the next trigger.
+     */
+    runLockStaleMs: int('SCRAPE_RUN_LOCK_STALE_MS', 15 * 60_000),
   },
 };
 

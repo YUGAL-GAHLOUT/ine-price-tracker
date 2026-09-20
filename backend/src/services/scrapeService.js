@@ -204,6 +204,8 @@ export async function runScrape({ trigger = 'manual', products, headed = false, 
   activeRunId = run.id;
   const browser = await getBrowser({ headed, slowMo });
   const results = [];
+  const deadline = Date.now() + config.scraper.runDeadlineMs;
+  let skippedForTime = 0;
   let cursor = 0;
   const limit = Math.max(1, Math.min(config.scraper.concurrency, headed ? 1 : 8));
 
@@ -211,6 +213,13 @@ export async function runScrape({ trigger = 'manual', products, headed = false, 
     while (cursor < products.length) {
       const index = cursor++;
       const product = products[index];
+      // Out of time: leave the rest due rather than running past the ceiling the
+      // stale-lock reaper is calibrated against. They are picked up next cycle.
+      if (Date.now() >= deadline) {
+        skippedForTime += 1;
+        logger.warn('scrape.run.deadline', { product: product.store_product_id });
+        continue;
+      }
       // Space requests out. Scraping several products back to back is exactly what
       // earns a 429 from the store, which then costs far more time than this wait.
       if (index > 0) await sleep(PRODUCT_GAP_MS + Math.floor(Math.random() * 2_000));
@@ -237,6 +246,7 @@ export async function runScrape({ trigger = 'manual', products, headed = false, 
       productsTotal: products.length,
       productsSuccess: success,
       productsFailed: results.length - success,
+      notes: skippedForTime ? `${skippedForTime} product(s) left for the next run: hit the ${Math.round(config.scraper.runDeadlineMs / 60_000)}-minute run deadline` : null,
     });
   }
 

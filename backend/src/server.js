@@ -40,11 +40,16 @@ function scheduleCatchUp() {
 
 async function shutdown(signal) {
   logger.info('server.shutdown', { signal });
-  server.close();
-  // Hand back the run lock before we go. Otherwise a deploy or a free-tier
-  // restart that lands mid-scrape blocks every subsequent scrape until the
-  // stale-run reaper catches up 20 minutes later.
+  // Hand back the run lock FIRST, before closing anything. A deploy or a
+  // free-tier restart that lands mid-scrape otherwise leaves a `running` row
+  // that blocks every subsequent scrape until the reaper catches up, and the
+  // platform gives no promise about how long this handler gets — so the one
+  // write that matters goes first and does not queue behind a browser teardown.
+  //
+  // It is still best-effort: a SIGKILL skips this entirely. The reaper, not this
+  // handler, is what guarantees the lock is eventually freed.
   await releaseActiveRun(`Interrupted: process received ${signal} mid-run`).catch(() => {});
+  server.close();
   await closeBrowser();
   process.exit(0);
 }
