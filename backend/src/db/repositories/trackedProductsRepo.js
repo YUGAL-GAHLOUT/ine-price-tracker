@@ -12,10 +12,25 @@ export async function list() {
  * Without this, a 2-hourly schedule silently becomes a 4-hourly one. `last_scraped_at`
  * is stamped when the scrape *finishes*, so the 08:00 run compares against 06:00:45
  * — 1 h 59 m 15 s, just under the interval — skips the product, and the next chance
- * is 10:00. The drift compounds every run. A grace window absorbs the run's own
- * duration plus the cron service's jitter and cold-start delay.
+ * is 10:00. The drift compounds every run.
+ *
+ * The window has to absorb everything that sits between the scheduled instant and
+ * the comparison, and on a sleeping free instance that is a lot: the run's own
+ * duration (3-6 min for seven products, since each one retries), the cron service's
+ * jitter, and a cold start that can put three minutes between the trigger firing and
+ * a process existing to handle it. A fixed 10 minutes does not cover that — a run
+ * that finished at 08:20 is not "due" until 10:10, so the 10:00 trigger finds nothing
+ * to do and the next attempt is 12:00.
+ *
+ * A quarter of the interval covers it with room to spare, capped so a long interval
+ * does not inherit an absurd window. It cannot cause double-scraping: the earliest a
+ * product can be re-scraped is 90 minutes after the last one on a 2-hourly schedule,
+ * which is still later than any second trigger in the same cycle.
  */
-const DUE_GRACE_MS = 10 * 60_000;
+function dueGraceMs(intervalMinutes) {
+  const quarter = (intervalMinutes * 60_000) / 4;
+  return Math.min(Math.max(quarter, 10 * 60_000), 30 * 60_000);
+}
 
 /** Active products whose configured interval has (near enough) elapsed. */
 export async function listDue({ ignoreInterval = false } = {}) {
@@ -28,7 +43,7 @@ export async function listDue({ ignoreInterval = false } = {}) {
   return rows.filter((p) => {
     if (!p.last_scraped_at) return true;
     const elapsed = now - new Date(p.last_scraped_at).getTime();
-    return elapsed >= p.scrape_interval_minutes * 60_000 - DUE_GRACE_MS;
+    return elapsed >= p.scrape_interval_minutes * 60_000 - dueGraceMs(p.scrape_interval_minutes);
   });
 }
 
